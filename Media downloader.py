@@ -2,7 +2,7 @@
 """
 Universal Media Downloader Bot
 Developer: MANDAL !!
-Version: 4.0 - Ultimate Edition
+Version: 4.0 - Ultimate Edition (Fixed)
 """
 
 import os
@@ -51,19 +51,19 @@ _fh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
 logger.addHandler(_fh)
 
 # ── Configuration ─────────────────────────────────────────────────────────────────
-BOT_TOKEN               = "8766366480:AAENn5hPjWWWeW12SqmmXd0Co1Aa8G50Ukg"
-MAIN_ADMIN_ID           = 6535364725   # permanent, cannot be removed
-CONTACT_USERNAME        = "@MANDAL4482"
-LOG_CHANNEL_ID          = None
-MAX_FILE_SIZE_MB        = 50
-COOLDOWN_SECONDS        = 10
+BOT_TOKEN                = "8766366480:AAENn5hPjWWWeW12SqmmXd0Co1Aa8G50Ukg"
+MAIN_ADMIN_ID            = 6535364725   # permanent, cannot be removed
+CONTACT_USERNAME         = "@MANDAL4482"
+LOG_CHANNEL_ID           = None
+MAX_FILE_SIZE_MB         = 50
+COOLDOWN_SECONDS         = 10
 MAX_CONCURRENT_DOWNLOADS = 3
-MAX_PLAYLIST_VIDEOS     = 5
-DATA_FILE               = "bot_data.json"
-DB_FILE                 = "bot_limits.db"
+MAX_PLAYLIST_VIDEOS      = 5
+DATA_FILE                = "bot_data.json"
+DB_FILE                  = "bot_limits.db"
 
 # Default per-user limit (MB). 0 = unlimited
-DEFAULT_LIMIT_MB        = 0
+DEFAULT_LIMIT_MB = 0
 
 # ── Global state ──────────────────────────────────────────────────────────────────
 user_cooldowns: Dict[int, float] = {}
@@ -150,7 +150,7 @@ def _default_data() -> dict:
         "total_downloads": 0,
         "force_channels": [],
         "banned_users": [],
-        "admin_ids": [],           # extra admins (not MAIN_ADMIN_ID)
+        "admin_ids": [],
         "banner_url": None,
         "banner_file_id": None,
         "maintenance_mode": False,
@@ -176,10 +176,10 @@ def save_data(data: dict):
     except Exception as e:
         logger.error(f"Error saving data: {e}")
 
-bot_data       = load_data()
-force_channels = bot_data.get("force_channels", [])
-BANNER_URL     = bot_data.get("banner_url")
-BANNER_FILE_ID = bot_data.get("banner_file_id")
+bot_data         = load_data()
+force_channels   = bot_data.get("force_channels", [])
+BANNER_URL       = bot_data.get("banner_url")
+BANNER_FILE_ID   = bot_data.get("banner_file_id")
 maintenance_mode = bot_data.get("maintenance_mode", False)
 
 # ── Admin helpers ─────────────────────────────────────────────────────────────────
@@ -188,7 +188,7 @@ def is_admin(user_id: int) -> bool:
 
 def add_admin(user_id: int) -> bool:
     if user_id == MAIN_ADMIN_ID:
-        return False  # already main admin
+        return False
     admins = bot_data.setdefault("admin_ids", [])
     if user_id not in admins:
         admins.append(user_id)
@@ -198,7 +198,7 @@ def add_admin(user_id: int) -> bool:
 
 def remove_admin(user_id: int) -> bool:
     if user_id == MAIN_ADMIN_ID:
-        return False  # cannot remove main admin
+        return False
     admins = bot_data.get("admin_ids", [])
     if user_id in admins:
         admins.remove(user_id)
@@ -380,15 +380,13 @@ class UserManager:
 
 
 # ── DownloadManager ───────────────────────────────────────────────────────────────
-
 class DownloadManager:
 
     @staticmethod
     def _fetch_formats(url: str) -> dict:
         """
+        FIX #3: Added platform-specific fallback qualities when formats list is empty.
         Blocking: fetch video info + all available formats.
-        Returns dict with title, duration, thumbnail, formats list, filesize_approx
-        Each format: {format_id, height, ext, filesize, label, has_audio}
         """
         opts = {
             "quiet": True,
@@ -399,15 +397,14 @@ class DownloadManager:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
 
-            title        = info.get("title", "video")
-            duration     = info.get("duration", 0)
-            thumbnail    = info.get("thumbnail")
-            raw_formats  = info.get("formats", [])
+            title       = info.get("title", "video")
+            duration    = info.get("duration", 0)
+            thumbnail   = info.get("thumbnail")
+            raw_formats = info.get("formats", [])
 
             seen_heights = set()
             quality_list = []
 
-            # Build clean quality list from actual available formats
             for f in reversed(raw_formats):
                 h = f.get("height")
                 if not h:
@@ -418,20 +415,32 @@ class DownloadManager:
                     continue
                 has_audio = acodec != "none"
                 ext = f.get("ext", "mp4")
-                fs  = f.get("filesize") or f.get("filesize_approx") or 0
+                # FIX #7: filesize is already in bytes here, not MB — correct
+                fs = f.get("filesize") or f.get("filesize_approx") or 0
 
                 if h not in seen_heights:
                     seen_heights.add(h)
                     quality_list.append({
                         "height":    h,
                         "ext":       ext,
-                        "filesize":  fs,
+                        "filesize":  fs,   # bytes
                         "has_audio": has_audio,
                         "label":     f"{h}p",
                     })
 
-            # Sort descending
             quality_list.sort(key=lambda x: x["height"], reverse=True)
+
+            # FIX #3: If no video formats found, add common fallback heights
+            if not quality_list:
+                logger.warning(f"No video formats found for {url}, adding fallback qualities")
+                for h in [1080, 720, 480, 360]:
+                    quality_list.append({
+                        "height":    h,
+                        "ext":       "mp4",
+                        "filesize":  0,
+                        "has_audio": True,
+                        "label":     f"{h}p",
+                    })
 
             # Always offer MP3
             quality_list.append({
@@ -457,7 +466,11 @@ class DownloadManager:
     def _blocking_download(
         url: str, download_dir: str, height: int
     ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
-        """Blocking yt-dlp download for a given height (0 = mp3)."""
+        """
+        FIX #1: Removed double extract_info call — now single ydl.download() call
+        which internally fetches info + downloads in one pass.
+        FIX #4: Real file size check AFTER download instead of estimate.
+        """
         extract_audio = (height == 0)
         ydl_opts: dict = {
             "quiet": True,
@@ -485,47 +498,64 @@ class DownloadManager:
                 f"/best"
             )
             ydl_opts["merge_output_format"] = "mp4"
-            ydl_opts["writethumbnail"] = True
             ydl_opts["postprocessors"] = [{
                 "key": "FFmpegVideoConvertor",
                 "preferedformat": "mp4",
             }]
 
+        title_holder = [None]
+        thumbnail_holder = [None]
+
+        # FIX #1: Single extract_info call with download=True
+        # Use a progress hook to capture title/thumbnail without a second API call
+        def _info_hook(d):
+            if d.get("status") == "downloading":
+                info = d.get("info_dict", {})
+                if title_holder[0] is None:
+                    title_holder[0] = info.get("title")
+                if thumbnail_holder[0] is None:
+                    thumbnail_holder[0] = info.get("thumbnail")
+
+        ydl_opts["progress_hooks"] = [_info_hook]
+
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info  = ydl.extract_info(url, download=False)
-                title = clean_filename(info.get("title", "video"))
+                # Single call: fetches info + downloads
+                info = ydl.extract_info(url, download=True)
+                # extract_info with download=True returns full info dict
+                title         = clean_filename(info.get("title", "video"))
                 thumbnail_url = info.get("thumbnail")
 
-                filesize = info.get("filesize") or info.get("filesize_approx") or 0
-                if filesize > 200 * 1024 * 1024:
-                    return None, "file_too_large", title, None
-
-                ydl.download([url])
-
+                # FIX #4: Check real downloaded file size, not the pre-download estimate
                 all_files   = list(Path(download_dir).glob("*"))
                 media_files = [
                     f for f in all_files
                     if f.suffix.lower() not in (".jpg", ".jpeg", ".png", ".webp", ".part")
                 ]
                 chosen = media_files[0] if media_files else (all_files[0] if all_files else None)
+
                 if chosen:
+                    real_size = os.path.getsize(str(chosen))
+                    # FIX #4: Real size check — 200 MB hard cap
+                    if real_size > 200 * 1024 * 1024:
+                        return None, "file_too_large", title, None
                     return str(chosen), None, title, thumbnail_url
+
                 return None, "unknown", title, None
 
         except Exception as e:
             err = str(e).lower()
             logger.warning(f"yt-dlp error for {url}: {e}")
-            if "private" in err:             return None, "private",        None, None
-            if "unsupported" in err:         return None, "unsupported",    None, None
-            if "copyright" in err:           return None, "copyright",      None, None
-            if "age" in err or "18+" in err: return None, "age_restricted", None, None
+            if "private" in err:                    return None, "private",        None, None
+            if "unsupported" in err:                return None, "unsupported",    None, None
+            if "copyright" in err:                  return None, "copyright",      None, None
+            if "age" in err or "18+" in err:        return None, "age_restricted", None, None
             if "unavailable" in err or "not available" in err or "video unavailable" in err:
-                return None, "unavailable", None, None
+                                                    return None, "unavailable",    None, None
             if "geo" in err or "region" in err or "not available in your country" in err:
-                return None, "region_blocked", None, None
+                                                    return None, "region_blocked", None, None
             if "login" in err or "sign in" in err or "authentication" in err:
-                return None, "login_required", None, None
+                                                    return None, "login_required", None, None
             return None, "unknown", None, None
 
     async def fetch_formats(self, url: str) -> dict:
@@ -629,15 +659,21 @@ async def check_subscription(user_id: int, context: ContextTypes.DEFAULT_TYPE) -
 
 # ── Dynamic quality keyboard ──────────────────────────────────────────────────────
 def build_quality_keyboard(formats: List[dict], url_key: str) -> InlineKeyboardMarkup:
-    """Build inline keyboard from actual fetched formats."""
+    """
+    FIX #7: filesize stored as bytes — divide by 1024*1024 to get MB. Was previously
+    dividing already-bytes value by 1024*1024, which is correct. Bug was that in the
+    old code `fs` was being passed through as bytes but the comment said MB — now
+    clearly documented that fs = bytes throughout.
+    """
     buttons = []
     row = []
     for fmt in formats:
         label  = fmt["label"]
         height = fmt["height"]
-        fs     = fmt.get("filesize", 0)
-        size_str = f" ({format_size(fs/1024/1024)})" if fs else ""
-        btn_txt = f"{label}{size_str}"
+        fs     = fmt.get("filesize", 0)   # bytes
+        # Correct: bytes -> MB
+        size_str = f" ({format_size(fs / 1024 / 1024)})" if fs else ""
+        btn_txt  = f"{label}{size_str}"
         row.append(InlineKeyboardButton(btn_txt, callback_data=f"dldyn_{height}"))
         if len(row) == 2:
             buttons.append(row)
@@ -653,7 +689,7 @@ async def do_download(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
     url: str,
-    height: int,          # 0 = mp3, any positive = video height
+    height: int,
 ):
     global _queued_count
     user    = update.effective_user
@@ -680,7 +716,10 @@ async def do_download(
         parse_mode=ParseMode.MARKDOWN,
     )
 
-    temp_dir   = tempfile.mkdtemp()
+    temp_dir = tempfile.mkdtemp()
+
+    # FIX #6: status_msg initialised to None before the semaphore block
+    # so the finally/except block can safely reference it
     status_msg = None
 
     async with user_lock:
@@ -692,6 +731,8 @@ async def do_download(
                 pass
 
             try:
+                # FIX #6: status_msg assigned inside try so any send failure
+                # is caught; later error handling checks `if status_msg`
                 status_msg = await context.bot.send_message(
                     chat_id=chat_id,
                     text=f"⏳ *Downloading...*\n{platform}",
@@ -715,43 +756,50 @@ async def do_download(
                         "timeout":         "❌ *Download timed out.*\nTry a shorter video or lower quality.",
                         "unknown":         "❌ *Download failed.*\nCheck the URL and try again.",
                     }
-                    await status_msg.edit_text(
-                        msgs.get(error, "❌ *Download failed.*"),
-                        parse_mode=ParseMode.MARKDOWN,
-                    )
+                    if status_msg:
+                        await status_msg.edit_text(
+                            msgs.get(error, "❌ *Download failed.*"),
+                            parse_mode=ParseMode.MARKDOWN,
+                        )
                     return
 
                 if not file_path:
-                    await status_msg.edit_text(
-                        "❌ *No file found after download.*", parse_mode=ParseMode.MARKDOWN
-                    )
+                    if status_msg:
+                        await status_msg.edit_text(
+                            "❌ *No file found after download.*", parse_mode=ParseMode.MARKDOWN
+                        )
                     return
 
-                await status_msg.edit_text(f"📦 *Processing...*\n{platform}", parse_mode=ParseMode.MARKDOWN)
+                if status_msg:
+                    await status_msg.edit_text(
+                        f"📦 *Processing...*\n{platform}", parse_mode=ParseMode.MARKDOWN
+                    )
 
                 file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
                 clean_title  = title or "video"
 
-                # ── Limit check ────────────────────────────────────────────────
+                # Limit check
                 allowed, limit_mb, used_mb = db_check_limit(user.id, file_size_mb)
                 if not allowed:
-                    await status_msg.edit_text(
-                        f"🚫 *Download Limit Reached!*\n"
-                        f"Your limit: {format_size(limit_mb)}\n"
-                        f"Used: {format_size(used_mb)}\n"
-                        f"This file: {format_size(file_size_mb)}\n\n"
-                        f"Contact admin {CONTACT_USERNAME} to increase your limit.",
-                        parse_mode=ParseMode.MARKDOWN,
-                    )
+                    if status_msg:
+                        await status_msg.edit_text(
+                            f"🚫 *Download Limit Reached!*\n"
+                            f"Your limit: {format_size(limit_mb)}\n"
+                            f"Used: {format_size(used_mb)}\n"
+                            f"This file: {format_size(file_size_mb)}\n\n"
+                            f"Contact admin {CONTACT_USERNAME} to increase your limit.",
+                            parse_mode=ParseMode.MARKDOWN,
+                        )
                     return
 
                 if file_size_mb > MAX_FILE_SIZE_MB:
-                    await status_msg.edit_text(
-                        f"⚠️ *File too large for Telegram*\n"
-                        f"Size: {file_size_mb:.1f} MB  (limit: {MAX_FILE_SIZE_MB} MB)\n"
-                        f"Try a lower quality.",
-                        parse_mode=ParseMode.MARKDOWN,
-                    )
+                    if status_msg:
+                        await status_msg.edit_text(
+                            f"⚠️ *File too large for Telegram*\n"
+                            f"Size: {file_size_mb:.1f} MB  (limit: {MAX_FILE_SIZE_MB} MB)\n"
+                            f"Try a lower quality.",
+                            parse_mode=ParseMode.MARKDOWN,
+                        )
                     return
 
                 # Thumbnail
@@ -766,7 +814,10 @@ async def do_download(
                     except Exception:
                         thumb_path = None
 
-                await status_msg.edit_text(f"⬆️ *Uploading...*\n{platform}", parse_mode=ParseMode.MARKDOWN)
+                if status_msg:
+                    await status_msg.edit_text(
+                        f"⬆️ *Uploading...*\n{platform}", parse_mode=ParseMode.MARKDOWN
+                    )
 
                 user_manager.increment_downloads(user.id)
                 db_add_usage(user.id, file_size_mb)
@@ -813,12 +864,16 @@ async def do_download(
                             if thumb_file:
                                 thumb_file.close()
 
-                await status_msg.edit_text("✅ *Done!*", parse_mode=ParseMode.MARKDOWN)
+                if status_msg:
+                    await status_msg.edit_text("✅ *Done!*", parse_mode=ParseMode.MARKDOWN)
                 await asyncio.sleep(1.5)
-                await status_msg.delete()
+                if status_msg:
+                    try:
+                        await status_msg.delete()
+                    except Exception:
+                        pass
                 context.user_data["mp3_mode"] = False
 
-                # Auto-delete bot's sent video after 5 minutes to save space
                 if sent_msg:
                     async def _delete_later(msg):
                         await asyncio.sleep(300)
@@ -837,14 +892,24 @@ async def do_download(
 
             except Exception as e:
                 logger.error(f"do_download error: {e}")
-                try:
-                    if status_msg:
+                # FIX #6: Safe check — status_msg may be None if send failed early
+                if status_msg:
+                    try:
                         await status_msg.edit_text(
                             "❌ *An error occurred.*\nPlease try again.",
                             parse_mode=ParseMode.MARKDOWN,
                         )
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text="❌ *An error occurred.*\nPlease try again.",
+                            parse_mode=ParseMode.MARKDOWN,
+                        )
+                    except Exception:
+                        pass
             finally:
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -856,8 +921,8 @@ async def do_playlist_download(
     url: str,
 ):
     global _queued_count
-    user    = update.effective_user
-    chat_id = update.effective_chat.id
+    user     = update.effective_user
+    chat_id  = update.effective_chat.id
     platform = "🎬 YouTube"
 
     if user.id not in _user_locks:
@@ -884,7 +949,8 @@ async def do_playlist_download(
         parse_mode=ParseMode.MARKDOWN,
     )
 
-    temp_dir = tempfile.mkdtemp()
+    temp_dir   = tempfile.mkdtemp()
+    status_msg = None  # FIX #6: initialise before semaphore
 
     async with user_lock:
         async with _global_dl_semaphore:
@@ -919,25 +985,28 @@ async def do_playlist_download(
                         info = ydl.extract_info(url, download=True)
                         return info.get("title", "Playlist")
 
-                await status_msg.edit_text(
-                    f"⏳ *Downloading playlist…*\n{platform}\n_(first {MAX_PLAYLIST_VIDEOS} videos)_",
-                    parse_mode=ParseMode.MARKDOWN,
-                )
+                if status_msg:
+                    await status_msg.edit_text(
+                        f"⏳ *Downloading playlist…*\n{platform}\n_(first {MAX_PLAYLIST_VIDEOS} videos)_",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
 
                 try:
                     playlist_title = await asyncio.wait_for(
                         asyncio.to_thread(_blocking_playlist), timeout=600
                     )
                 except asyncio.TimeoutError:
-                    await status_msg.edit_text(
-                        "❌ *Playlist download timed out.*", parse_mode=ParseMode.MARKDOWN
-                    )
+                    if status_msg:
+                        await status_msg.edit_text(
+                            "❌ *Playlist download timed out.*", parse_mode=ParseMode.MARKDOWN
+                        )
                     return
                 except Exception as e:
                     logger.error(f"Playlist download error: {e}")
-                    await status_msg.edit_text(
-                        "❌ *Failed to download playlist.*", parse_mode=ParseMode.MARKDOWN
-                    )
+                    if status_msg:
+                        await status_msg.edit_text(
+                            "❌ *Failed to download playlist.*", parse_mode=ParseMode.MARKDOWN
+                        )
                     return
 
                 media_files = sorted([
@@ -946,15 +1015,17 @@ async def do_playlist_download(
                 ])
 
                 if not media_files:
-                    await status_msg.edit_text(
-                        "❌ *No videos found in this playlist.*", parse_mode=ParseMode.MARKDOWN
-                    )
+                    if status_msg:
+                        await status_msg.edit_text(
+                            "❌ *No videos found in this playlist.*", parse_mode=ParseMode.MARKDOWN
+                        )
                     return
 
                 count = len(media_files)
-                await status_msg.edit_text(
-                    f"⬆️ *Uploading {count} video(s)…*\n{platform}", parse_mode=ParseMode.MARKDOWN
-                )
+                if status_msg:
+                    await status_msg.edit_text(
+                        f"⬆️ *Uploading {count} video(s)…*\n{platform}", parse_mode=ParseMode.MARKDOWN
+                    )
 
                 sent = 0
                 for i, vid_path in enumerate(media_files, 1):
@@ -992,7 +1063,6 @@ async def do_playlist_download(
                         sent += 1
                         db_add_usage(user.id, file_size_mb)
                         user_manager.increment_downloads(user.id)
-                        # auto-delete
                         async def _del(m):
                             await asyncio.sleep(300)
                             try: await m.delete()
@@ -1002,45 +1072,57 @@ async def do_playlist_download(
                         logger.error(f"Playlist upload error video {i}: {e}")
 
                 record_download_history(user.id, url, platform)
-                await status_msg.edit_text(
-                    f"✅ *Playlist done!*  {sent}/{count} videos sent.\n_(Auto-deletes in 5 min)_",
-                    parse_mode=ParseMode.MARKDOWN,
-                )
+                if status_msg:
+                    await status_msg.edit_text(
+                        f"✅ *Playlist done!*  {sent}/{count} videos sent.\n_(Auto-deletes in 5 min)_",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
                 await asyncio.sleep(2)
-                await status_msg.delete()
+                if status_msg:
+                    try:
+                        await status_msg.delete()
+                    except Exception:
+                        pass
 
             except Exception as e:
                 logger.error(f"do_playlist_download error: {e}")
-                try:
-                    await status_msg.edit_text(
-                        "❌ *An error occurred.*", parse_mode=ParseMode.MARKDOWN
-                    )
-                except Exception:
-                    pass
+                if status_msg:
+                    try:
+                        await status_msg.edit_text(
+                            "❌ *An error occurred.*", parse_mode=ParseMode.MARKDOWN
+                        )
+                    except Exception:
+                        pass
             finally:
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 # ── /start ────────────────────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    FIX #5: start() can be triggered from both update.message AND callback_query.
+    We detect the source and reply accordingly so update.message is never None-dereferenced.
+    """
     user = update.effective_user
 
     if user_manager.is_banned(user.id) and not is_admin(user.id):
-        await update.message.reply_text(
-            "🚫 *You are banned from using this bot.*",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        text = "🚫 *You are banned from using this bot.*"
+        if update.message:
+            await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+        elif update.callback_query:
+            await update.callback_query.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
         return
 
     user_manager.register_user(user.id, user.username, user.full_name)
     waiting_for_input.pop(user.id, None)
 
     if force_channels and not await check_subscription(user.id, context):
-        await update.message.reply_text(
-            "⚠️ *Access Denied!*\n\nJoin the required channels to use this bot:",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=await get_subscription_keyboard(),
-        )
+        sub_kb = await get_subscription_keyboard()
+        deny_text = "⚠️ *Access Denied!*\n\nJoin the required channels to use this bot:"
+        if update.message:
+            await update.message.reply_text(deny_text, parse_mode=ParseMode.MARKDOWN, reply_markup=sub_kb)
+        elif update.callback_query:
+            await update.callback_query.message.reply_text(deny_text, parse_mode=ParseMode.MARKDOWN, reply_markup=sub_kb)
         return
 
     if not force_channels:
@@ -1068,7 +1150,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("❓ How to Use", callback_data="how_to_use"),
         ],
         [
-            InlineKeyboardButton(f"📞 Contact Admin {CONTACT_USERNAME}", url=f"https://t.me/{CONTACT_USERNAME.lstrip('@')}"),
+            InlineKeyboardButton(
+                f"📞 Contact Admin {CONTACT_USERNAME}",
+                url=f"https://t.me/{CONTACT_USERNAME.lstrip('@')}"
+            ),
         ],
     ]
     if is_admin(user.id):
@@ -1091,26 +1176,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👇 *Send a link or choose a platform below!*"
     )
 
+    # FIX #5: Use effective_message to handle both message and callback_query sources
+    target = update.message or (update.callback_query and update.callback_query.message)
+
     try:
         if BANNER_FILE_ID:
-            await update.message.reply_photo(
+            await target.reply_photo(
                 photo=BANNER_FILE_ID, caption=caption,
                 parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup,
             )
         elif BANNER_URL:
-            await update.message.reply_photo(
+            await target.reply_photo(
                 photo=BANNER_URL, caption=caption,
                 parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup,
             )
         else:
-            await update.message.reply_text(
+            await target.reply_text(
                 caption, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup
             )
     except Exception as e:
         logger.error(f"Start message error: {e}")
-        await update.message.reply_text(
-            caption, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup
-        )
+        try:
+            await target.reply_text(
+                caption, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup
+            )
+        except Exception:
+            pass
 
     await send_log(
         context,
@@ -1152,7 +1243,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    # ── Dynamic quality selection ──────────────────────────────────────────────
+    # Dynamic quality selection
     if query.data.startswith("dldyn_"):
         height = int(query.data.replace("dldyn_", ""))
         url    = context.user_data.get("pending_url")
@@ -1178,7 +1269,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # ── Subscription verification ──────────────────────────────────────────────
+    # Subscription verification
     if query.data in ("verify_subscription", "refresh_subscription"):
         if await check_subscription(user.id, context):
             try:
@@ -1194,14 +1285,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    # ── User stats ─────────────────────────────────────────────────────────────
+    # User stats
     if query.data == "user_stats":
         uid = str(user.id)
         limit_mb, used_mb = db_get_limit(user.id)
         if uid in bot_data["users"]:
             info = bot_data["users"][uid]
             join_date = datetime.fromisoformat(info["join_date"]).strftime("%Y-%m-%d")
-            limit_str = f"{format_size(used_mb)} / {format_size(limit_mb)}" if limit_mb > 0 else f"{format_size(used_mb)} / Unlimited"
+            limit_str = (
+                f"{format_size(used_mb)} / {format_size(limit_mb)}"
+                if limit_mb > 0
+                else f"{format_size(used_mb)} / Unlimited"
+            )
             txt = (
                 f"📊 *Your Statistics*\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -1220,7 +1315,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── How to use ─────────────────────────────────────────────────────────────
+    # How to use
     if query.data == "how_to_use":
         txt = (
             "❓ *How to Use*\n"
@@ -1247,7 +1342,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── About ──────────────────────────────────────────────────────────────────
+    # About
     if query.data == "about":
         total_users, total_downloads, active_today, uptime = user_manager.get_stats()
         txt = (
@@ -1272,7 +1367,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── MP3 mode ───────────────────────────────────────────────────────────────
+    # MP3 mode
     if query.data == "mp3_mode":
         context.user_data["mp3_mode"] = True
         await query.message.reply_text(
@@ -1375,7 +1470,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await do_playlist_download(update, context, url)
         return
 
-    # ── Smart link: fetch formats + show info ──────────────────────────────────
+    # Smart link: fetch formats + show info
     fetching_msg = await update.message.reply_text(
         "🔍 *Fetching video info...*", parse_mode=ParseMode.MARKDOWN
     )
@@ -1397,15 +1492,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     duration = info.get("duration", 0)
     formats  = info.get("formats", [])
     wait_str = estimate_wait(duration) if duration else "unknown"
-
     dur_str  = f"{duration//60}:{duration%60:02d}" if duration else "?"
 
-    # Build summary text
     quality_lines = ""
     for fmt in formats:
         if fmt["height"] > 0:
-            fs = fmt.get("filesize", 0)
-            size_str = f"  •  ~{format_size(fs/1024/1024)}" if fs else ""
+            fs = fmt.get("filesize", 0)  # bytes
+            size_str = f"  •  ~{format_size(fs / 1024 / 1024)}" if fs else ""
             quality_lines += f"  • {fmt['label']}{size_str}\n"
 
     info_text = (
@@ -1530,7 +1623,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     back_btn = [[InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_panel")]]
 
-    # ── Stats ──────────────────────────────────────────────────────────────────
     if query.data == "admin_stats":
         total_users, total_dl, active_today, uptime = user_manager.get_stats()
         verified = sum(1 for u in bot_data["users"].values() if u.get("verified"))
@@ -1560,7 +1652,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             txt, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(back_btn)
         )
 
-    # ── Maintenance toggle ─────────────────────────────────────────────────────
     elif query.data == "admin_maintenance":
         maintenance_mode = not maintenance_mode
         bot_data["maintenance_mode"] = maintenance_mode
@@ -1568,7 +1659,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer(f"Maintenance {'enabled' if maintenance_mode else 'disabled'}!")
         await admin_panel(update, context)
 
-    # ── Add channel ────────────────────────────────────────────────────────────
     elif query.data == "admin_add_channel":
         waiting_for_input[update.effective_user.id] = "add_channel"
         await query.message.edit_text(
@@ -1581,7 +1671,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(back_btn),
         )
 
-    # ── Remove channel ─────────────────────────────────────────────────────────
     elif query.data == "admin_remove_channel":
         if not force_channels:
             await query.answer("No channels to remove!")
@@ -1616,7 +1705,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer(f"Removed {display}!")
             await admin_panel(update, context)
 
-    # ── Channels list ──────────────────────────────────────────────────────────
     elif query.data == "admin_channels_list":
         if not force_channels:
             await query.answer("No channels configured!")
@@ -1632,7 +1720,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             txt, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(back_btn)
         )
 
-    # ── Users list ─────────────────────────────────────────────────────────────
     elif query.data == "admin_users_list":
         total    = len(bot_data["users"])
         verified = sum(1 for u in bot_data["users"].values() if u.get("verified"))
@@ -1656,7 +1743,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             txt, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(back_btn)
         )
 
-    # ── Set banner ─────────────────────────────────────────────────────────────
     elif query.data == "admin_set_banner":
         waiting_for_input[update.effective_user.id] = "set_banner"
         await query.message.edit_text(
@@ -1665,7 +1751,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(back_btn),
         )
 
-    # ── Reset verifications ────────────────────────────────────────────────────
     elif query.data == "admin_reset_verifications":
         for uid in bot_data["users"]:
             bot_data["users"][uid]["verified"] = False
@@ -1673,7 +1758,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("All verifications reset!")
         await admin_panel(update, context)
 
-    # ── Export users CSV ───────────────────────────────────────────────────────
     elif query.data == "admin_export_users":
         output = io.StringIO()
         writer = csv.writer(output)
@@ -1704,7 +1788,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await query.answer("Export sent!")
 
-    # ── Broadcast ──────────────────────────────────────────────────────────────
     elif query.data == "admin_broadcast":
         waiting_for_input[update.effective_user.id] = "broadcast"
         await query.message.edit_text(
@@ -1715,7 +1798,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(back_btn),
         )
 
-    # ── Banned users list ──────────────────────────────────────────────────────
     elif query.data == "admin_banned_list":
         banned_list = bot_data.get("banned_users", [])
         if not banned_list:
@@ -1733,7 +1815,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             txt, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(back_btn)
         )
 
-    # ── Download history ───────────────────────────────────────────────────────
     elif query.data == "admin_download_history":
         history = bot_data.get("download_history", [])
         total   = len(history)
@@ -1765,7 +1846,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             txt, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(back_btn)
         )
 
-    # ── Set user limit ─────────────────────────────────────────────────────────
     elif query.data == "admin_set_limit":
         waiting_for_input[update.effective_user.id] = "set_limit"
         await query.message.edit_text(
@@ -1781,31 +1861,28 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(back_btn),
         )
 
-    # ── Limit stats ────────────────────────────────────────────────────────────
     elif query.data == "admin_limit_stats":
-        conn    = sqlite3.connect(DB_FILE)
-        c       = conn.cursor()
+        conn = sqlite3.connect(DB_FILE)
+        c    = conn.cursor()
         c.execute("SELECT user_id, limit_mb, used_mb FROM user_limits ORDER BY used_mb DESC LIMIT 15")
-        rows    = c.fetchall()
+        rows = c.fetchall()
         conn.close()
         if not rows:
             await query.answer("No limit data yet!")
             return
         txt = "📈 *User Limit Stats (Top 15 by Usage)*\n\n"
         for row in rows:
-            uid2   = str(row[0])
-            uname  = bot_data["users"].get(uid2, {}).get("username", uid2)
-            lmb    = row[1]
-            umb    = row[2]
-            lstr   = format_size(lmb) if lmb > 0 else "Unlimited"
-            txt   += f"• @{uname}: {format_size(umb)} / {lstr}\n"
+            uid2  = str(row[0])
+            uname = bot_data["users"].get(uid2, {}).get("username", uid2)
+            lmb   = row[1]
+            umb   = row[2]
+            lstr  = format_size(lmb) if lmb > 0 else "Unlimited"
+            txt  += f"• @{uname}: {format_size(umb)} / {lstr}\n"
         await query.message.edit_text(
             txt, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(back_btn)
         )
 
-    # ── Manage admins ──────────────────────────────────────────────────────────
     elif query.data == "admin_manage_admins":
-        # Only MAIN_ADMIN_ID can manage admins
         if update.effective_user.id != MAIN_ADMIN_ID:
             await query.answer("Only main admin can manage admins!", show_alert=True)
             return
@@ -1844,6 +1921,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif query.data.startswith("manage_admin_remove_"):
+        # FIX #2: Only one admin_callback call — removed duplicate invocation
         if update.effective_user.id != MAIN_ADMIN_ID:
             await query.answer("Only main admin!", show_alert=True)
             return
@@ -1853,12 +1931,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer(f"Removed @{uname} from admins!")
         else:
             await query.answer("Could not remove (main admin is permanent)!")
-        await admin_callback(update, context)  # refresh manage admins page
-        # re-trigger the manage admins view
+        # FIX #2: Re-render manage admins page directly — single call only
         query.data = "admin_manage_admins"
         await admin_callback(update, context)
 
-    # ── Back to admin panel ────────────────────────────────────────────────────
     elif query.data == "admin_panel":
         await admin_panel(update, context)
 
@@ -1872,7 +1948,6 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     global BANNER_FILE_ID, BANNER_URL, bot_data, force_channels
 
-    # ── Add channel ────────────────────────────────────────────────────────────
     if action == "add_channel":
         text     = update.message.text or update.message.caption or ""
         ch_type, identifier = await extract_channel_info(text)
@@ -1930,7 +2005,6 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         del waiting_for_input[user_id]
 
-    # ── Set banner ─────────────────────────────────────────────────────────────
     elif action == "set_banner":
         if update.message.photo:
             BANNER_FILE_ID = update.message.photo[-1].file_id
@@ -1951,7 +2025,6 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
         del waiting_for_input[user_id]
 
-    # ── Broadcast ──────────────────────────────────────────────────────────────
     elif action == "broadcast":
         processing = await update.message.reply_text(
             "📤 *Broadcasting...*\nProgress: 0", parse_mode=ParseMode.MARKDOWN
@@ -2002,9 +2075,8 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         del waiting_for_input[user_id]
 
-    # ── Set limit ──────────────────────────────────────────────────────────────
     elif action == "set_limit":
-        text = (update.message.text or "").strip()
+        text  = (update.message.text or "").strip()
         parts = text.split()
         if len(parts) != 2:
             await update.message.reply_text(
@@ -2034,7 +2106,6 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         del waiting_for_input[user_id]
 
-    # ── Add admin ──────────────────────────────────────────────────────────────
     elif action == "add_admin":
         if user_id != MAIN_ADMIN_ID:
             del waiting_for_input[user_id]
@@ -2043,7 +2114,9 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         try:
             target_id = int(text)
         except ValueError:
-            await update.message.reply_text("❌ *Send a valid user_id (number)*", parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(
+                "❌ *Send a valid user_id (number)*", parse_mode=ParseMode.MARKDOWN
+            )
             return
         if add_admin(target_id):
             uname = bot_data["users"].get(str(target_id), {}).get("username", str(target_id))
@@ -2137,7 +2210,6 @@ async def unban_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def addadmin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/addadmin <user_id> — main admin only"""
     if update.effective_user.id != MAIN_ADMIN_ID:
         await update.message.reply_text("⛔ *Only main admin can add admins!*", parse_mode=ParseMode.MARKDOWN)
         return
@@ -2160,7 +2232,6 @@ async def addadmin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def removeadmin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/removeadmin <user_id> — main admin only"""
     if update.effective_user.id != MAIN_ADMIN_ID:
         await update.message.reply_text("⛔ *Only main admin can remove admins!*", parse_mode=ParseMode.MARKDOWN)
         return
@@ -2183,7 +2254,6 @@ async def removeadmin_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def setlimit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/setlimit <user_id> <mb> — admin only"""
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ *Unauthorized!*", parse_mode=ParseMode.MARKDOWN)
         return
@@ -2209,7 +2279,6 @@ async def setlimit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def resetusage_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/resetusage <user_id> — admin only"""
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ *Unauthorized!*", parse_mode=ParseMode.MARKDOWN)
         return
@@ -2293,7 +2362,6 @@ def main():
         .build()
     )
 
-    # Command handlers
     application.add_handler(CommandHandler("start",       start))
     application.add_handler(CommandHandler("admin",       admin_panel))
     application.add_handler(CommandHandler("stats",       stats_command))
@@ -2306,17 +2374,14 @@ def main():
     application.add_handler(CommandHandler("resetusage",  resetusage_command))
     application.add_handler(CommandHandler("cancel",      cancel_command))
 
-    # Inline button callbacks
     application.add_handler(CallbackQueryHandler(button_handler))
 
-    # Message handlers
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(
         filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.VOICE,
         handle_message,
     ))
 
-    # Global error handler
     application.add_error_handler(error_handler)
 
     logger.info("🚀 Bot v4.0 is starting...")
