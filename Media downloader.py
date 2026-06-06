@@ -1212,7 +1212,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── button_handler ────────────────────────────────────────────────────────────────
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        pass  # Query too old (Render free tier spin-up delay)
 
     user = query.from_user
 
@@ -1491,8 +1494,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title    = clean_filename(info["title"])
     duration = info.get("duration", 0)
     formats  = info.get("formats", [])
-    wait_str = estimate_wait(duration) if duration else "unknown"
-    dur_str  = f"{duration//60}:{duration%60:02d}" if duration else "?"
+    wait_str = estimate_wait(int(duration)) if duration else "unknown"
+    dur_str  = f"{int(duration)//60}:{int(duration)%60:02d}" if duration else "?"
 
     quality_lines = ""
     for fmt in formats:
@@ -1656,7 +1659,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         maintenance_mode = not maintenance_mode
         bot_data["maintenance_mode"] = maintenance_mode
         save_data(bot_data)
-        await query.answer(f"Maintenance {'enabled' if maintenance_mode else 'disabled'}!")
+        try:
+            await query.answer(f"Maintenance {'enabled' if maintenance_mode else 'disabled'}!")
+        except Exception:
+            pass
         await admin_panel(update, context)
 
     elif query.data == "admin_add_channel":
@@ -1673,7 +1679,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "admin_remove_channel":
         if not force_channels:
-            await query.answer("No channels to remove!")
+            try:
+                await query.answer("No channels to remove!")
+            except Exception:
+                pass
             return
         keyboard = [
             [InlineKeyboardButton(
@@ -1702,12 +1711,18 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"@{removed['identifier']}" if removed.get("type") == "public"
                 else "Private Channel"
             )
-            await query.answer(f"Removed {display}!")
+            try:
+                await query.answer(f"Removed {display}!")
+            except Exception:
+                pass
             await admin_panel(update, context)
 
     elif query.data == "admin_channels_list":
         if not force_channels:
-            await query.answer("No channels configured!")
+            try:
+                await query.answer("No channels configured!")
+            except Exception:
+                pass
             return
         txt = "📢 *Force Channels List*\n\n"
         for i, ch in enumerate(force_channels, 1):
@@ -1755,7 +1770,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for uid in bot_data["users"]:
             bot_data["users"][uid]["verified"] = False
         save_data(bot_data)
-        await query.answer("All verifications reset!")
+        try:
+            await query.answer("All verifications reset!")
+        except Exception:
+            pass
         await admin_panel(update, context)
 
     elif query.data == "admin_export_users":
@@ -1786,7 +1804,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             filename=f"users_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
             caption="📊 Users Export",
         )
-        await query.answer("Export sent!")
+        try:
+            await query.answer("Export sent!")
+        except Exception:
+            pass
 
     elif query.data == "admin_broadcast":
         waiting_for_input[update.effective_user.id] = "broadcast"
@@ -1801,7 +1822,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "admin_banned_list":
         banned_list = bot_data.get("banned_users", [])
         if not banned_list:
-            await query.answer("No banned users!")
+            try:
+                await query.answer("No banned users!")
+            except Exception:
+                pass
             return
         txt = f"🚫 *Banned Users ({len(banned_list)})*\n\n"
         for uid in banned_list[:20]:
@@ -1819,7 +1843,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         history = bot_data.get("download_history", [])
         total   = len(history)
         if not history:
-            await query.answer("No download history yet!")
+            try:
+                await query.answer("No download history yet!")
+            except Exception:
+                pass
             return
         recent    = list(reversed(history[-20:]))
         platforms: Dict[str, int] = {}
@@ -1868,7 +1895,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows = c.fetchall()
         conn.close()
         if not rows:
-            await query.answer("No limit data yet!")
+            try:
+                await query.answer("No limit data yet!")
+            except Exception:
+                pass
             return
         txt = "📈 *User Limit Stats (Top 15 by Usage)*\n\n"
         for row in rows:
@@ -1884,7 +1914,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "admin_manage_admins":
         if update.effective_user.id != MAIN_ADMIN_ID:
-            await query.answer("Only main admin can manage admins!", show_alert=True)
+            try:
+                await query.answer("Only main admin can manage admins!", show_alert=True)
+            except Exception:
+                pass
             return
         admins = bot_data.get("admin_ids", [])
         txt    = (
@@ -1911,7 +1944,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "manage_admin_add":
         if update.effective_user.id != MAIN_ADMIN_ID:
-            await query.answer("Only main admin!", show_alert=True)
+            try:
+                await query.answer("Only main admin!", show_alert=True)
+            except Exception:
+                pass
             return
         waiting_for_input[update.effective_user.id] = "add_admin"
         await query.message.edit_text(
@@ -1923,14 +1959,23 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith("manage_admin_remove_"):
         # FIX #2: Only one admin_callback call — removed duplicate invocation
         if update.effective_user.id != MAIN_ADMIN_ID:
-            await query.answer("Only main admin!", show_alert=True)
+            try:
+                await query.answer("Only main admin!", show_alert=True)
+            except Exception:
+                pass
             return
         target_id = int(query.data.replace("manage_admin_remove_", ""))
         if remove_admin(target_id):
             uname = bot_data["users"].get(str(target_id), {}).get("username", str(target_id))
-            await query.answer(f"Removed @{uname} from admins!")
+            try:
+                await query.answer(f"Removed @{uname} from admins!")
+            except Exception:
+                pass
         else:
-            await query.answer("Could not remove (main admin is permanent)!")
+            try:
+                await query.answer("Could not remove (main admin is permanent)!")
+            except Exception:
+                pass
         # FIX #2: Re-render manage admins page directly — single call only
         query.data = "admin_manage_admins"
         await admin_callback(update, context)
