@@ -274,6 +274,52 @@ def _force_download_url(cdn_url: str) -> str:
     return f"{cdn_url}{separator}dl=1"
 
 
+
+def _upload_to_filehost(file_path: str) -> Optional[str]:
+    """
+    File ko 0x0.st pe upload karo — wahan se proper download link milta hai.
+    Fallback: file.io
+    Max size: 0x0.st = 512MB, file.io = 2GB
+    """
+    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+    filename = os.path.basename(file_path)
+
+    # Try 0x0.st first (simple, reliable, direct download link)
+    try:
+        with open(file_path, 'rb') as f:
+            resp = requests.post(
+                'https://0x0.st',
+                files={'file': (filename, f)},
+                timeout=300,
+            )
+        if resp.status_code == 200 and resp.text.strip().startswith('http'):
+            link = resp.text.strip()
+            logger.info(f"Uploaded to 0x0.st: {link}")
+            return link
+    except Exception as e:
+        logger.warning(f"0x0.st upload failed: {e}")
+
+    # Fallback: file.io (one-time download link)
+    try:
+        with open(file_path, 'rb') as f:
+            resp = requests.post(
+                'https://file.io',
+                files={'file': (filename, f)},
+                data={'expires': '1d'},
+                timeout=300,
+            )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get('success') and data.get('link'):
+                link = data['link']
+                logger.info(f"Uploaded to file.io: {link}")
+                return link
+    except Exception as e:
+        logger.warning(f"file.io upload failed: {e}")
+
+    return None
+
+
 def _get_direct_url(url: str, height: int) -> Optional[str]:
     """Get direct download URL using yt-dlp without downloading."""
     extract_audio = (height == 0)
@@ -872,18 +918,20 @@ async def do_download(
                     return
 
                 if file_size_mb > MAX_FILE_SIZE_MB:
-                    # ── Large file (>50MB): seedha direct download link ───────
+                    # ── Large file (>50MB): upload to filehost, give download link
                     quality_label = "🎵 MP3" if height == 0 else f"🎬 {height}p"
                     if status_msg:
                         await status_msg.edit_text(
-                            f"🔗 *File {file_size_mb:.1f} MB hai — direct link la raha hoon...*",
+                            f"☁️ *File {file_size_mb:.1f} MB hai*\n"
+                            f"⬆️ *Server pe upload ho rahi hai — please wait...*",
                             parse_mode=ParseMode.MARKDOWN,
                         )
-                    direct_url = await asyncio.to_thread(_get_direct_url, url, height)
-                    if direct_url:
+                    # Upload to free filehost — proper download link milega
+                    hosted_url = await asyncio.to_thread(_upload_to_filehost, file_path)
+                    if hosted_url:
                         kb = [[InlineKeyboardButton(
-                            "⬇️ Download Karo (Click Here)",
-                            url=direct_url[:2048]
+                            "⬇️ Download Karo",
+                            url=hosted_url
                         )]]
                         await context.bot.send_message(
                             chat_id=chat_id,
@@ -891,9 +939,9 @@ async def do_download(
                                 f"📥 *{clean_title[:60]}*\n"
                                 f"━━━━━━━━━━━━━━━━━━━━\n"
                                 f"📦 {file_size_mb:.1f} MB  •  {quality_label}  •  {platform}\n\n"
-                                f"⚠️ *File 50MB se badi hai — Telegram mein nahi ja sakti*\n"
-                                f"✅ *Neeche button dabao — seedha download hoga!*\n\n"
-                                f"_⏰ Link kuch ghanton mein expire hoga_"
+                                f"✅ *Download link ready hai!*\n"
+                                f"👇 *Button dabao — seedha download shuru hoga*\n\n"
+                                f"_⏰ Link 24 ghante mein expire hoga_"
                             ),
                             parse_mode=ParseMode.MARKDOWN,
                             reply_markup=InlineKeyboardMarkup(kb),
@@ -902,9 +950,8 @@ async def do_download(
                         await context.bot.send_message(
                             chat_id=chat_id,
                             text=(
-                                f"⚠️ *File {file_size_mb:.1f} MB hai — bahut badi*\n"
-                                f"Direct link nahi mila.\n"
-                                f"Lower quality try karo."
+                                f"⚠️ *File {file_size_mb:.1f} MB hai*\n"
+                                f"Upload nahi ho saki. Lower quality try karo."
                             ),
                             parse_mode=ParseMode.MARKDOWN,
                         )
@@ -916,7 +963,7 @@ async def do_download(
                     record_download_history(user.id, url, platform)
                     await send_log(
                         context,
-                        f"🔗 *Direct Link Sent*\n"
+                        f"☁️ *Filehost Link Sent*\n"
                         f"User: @{user.username or 'N/A'} (`{user.id}`)\n"
                         f"Platform: {platform}  •  Size: {file_size_mb:.1f} MB",
                     )
@@ -2523,6 +2570,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception:
             pass
+
 
 # ── main ──────────────────────────────────────────────────────────────────────────
 
