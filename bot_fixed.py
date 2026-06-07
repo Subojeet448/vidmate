@@ -262,6 +262,18 @@ def format_size(mb: float) -> str:
         return f"{mb/1024:.1f} GB"
     return f"{mb:.1f} MB"
 
+def _force_download_url(cdn_url: str) -> str:
+    """
+    CDN URL ko force-download URL mein convert karo.
+    ahcdn.com aur similar CDNs browser mein video player kholte hain —
+    yeh function URL mein dl=1 add karta hai taake seedha download ho.
+    """
+    if not cdn_url:
+        return cdn_url
+    separator = "&" if "?" in cdn_url else "?"
+    return f"{cdn_url}{separator}dl=1"
+
+
 def _get_direct_url(url: str, height: int) -> Optional[str]:
     """Get direct download URL using yt-dlp without downloading."""
     extract_audio = (height == 0)
@@ -280,14 +292,24 @@ def _get_direct_url(url: str, height: int) -> Optional[str]:
         "noplaylist": True,
         "format": fmt,
         "socket_timeout": 30,
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+        },
     }
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
             # For merged formats, get the best video url
             if "requested_formats" in info:
-                return info["requested_formats"][0].get("url")
-            return info.get("url")
+                raw = info["requested_formats"][0].get("url")
+            else:
+                raw = info.get("url")
+            # Force download instead of browser playback
+            return _force_download_url(raw) if raw else None
     except Exception as e:
         logger.error(f"_get_direct_url error: {e}")
         return None
@@ -860,7 +882,7 @@ async def do_download(
                     direct_url = await asyncio.to_thread(_get_direct_url, url, height)
                     if direct_url:
                         kb = [[InlineKeyboardButton(
-                            "⬇️ Download Karo",
+                            "⬇️ Download Karo (Click Here)",
                             url=direct_url[:2048]
                         )]]
                         await context.bot.send_message(
@@ -2502,8 +2524,6 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-
-# ── main ──────────────────────────────────────────────────────────────────────────
 # ── main ──────────────────────────────────────────────────────────────────────────
 
 def main():
