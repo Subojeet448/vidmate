@@ -275,33 +275,64 @@ def _force_download_url(cdn_url: str) -> str:
 
 
 
+def _try_transfersh(file_path: str, filename: str, timeout: int = 900) -> Optional[str]:
+    """
+    transfer.sh pe upload karo — unlimited size, seedha direct download link.
+    Simple PUT request: response mein direct link milta hai.
+    """
+    try:
+        with open(file_path, 'rb') as f:
+            resp = requests.put(
+                f'https://transfer.sh/{filename}',
+                data=f,
+                timeout=timeout,
+                headers={'Max-Days': '7'},   # 7 din tak live rahega
+            )
+        if resp.status_code == 200:
+            link = resp.text.strip()
+            if link.startswith('http'):
+                logger.info(f"Uploaded to transfer.sh: {link}")
+                return link
+    except Exception as e:
+        logger.warning(f"transfer.sh upload failed: {e}")
+    return None
+
+
 def _upload_to_filehost(file_path: str) -> Optional[str]:
     """
     File ko free filehost pe upload karo — direct download link milega.
-    Order: 1) Catbox.moe (direct link, 200MB limit)
-            2) Pixeldrain (no size limit, direct download)
-            3) GoFile.io (page link — last resort)
+    Order: 1) Catbox.moe  (≤200MB — seedha direct link)
+            2) transfer.sh (>200MB — unlimited, direct link)
+            3) Pixeldrain  (fallback — 10GB, direct link)
+            4) GoFile.io   (last resort)
     """
     filename = os.path.basename(file_path)
-    logger.info(f"Uploading {filename} to filehost...")
+    file_mb  = os.path.getsize(file_path) / (1024 * 1024)
+    logger.info(f"Uploading {filename} ({file_mb:.1f} MB) to filehost...")
 
-    # ── 1. Catbox.moe — BEST: direct download link, permanent, 200MB ─────────
-    try:
-        with open(file_path, 'rb') as f:
-            resp = requests.post(
-                'https://catbox.moe/user/api.php',
-                data={'reqtype': 'fileupload'},
-                files={'fileToUpload': (filename, f)},
-                timeout=600,
-            )
-        if resp.status_code == 200 and resp.text.strip().startswith('http'):
-            link = resp.text.strip()
-            logger.info(f"Uploaded to catbox.moe: {link}")
-            return link
-    except Exception as e:
-        logger.warning(f"catbox.moe upload failed: {e}")
+    # ── 1. Catbox.moe — direct download link, permanent (≤200MB only) ────────
+    if file_mb <= 195:
+        try:
+            with open(file_path, 'rb') as f:
+                resp = requests.post(
+                    'https://catbox.moe/user/api.php',
+                    data={'reqtype': 'fileupload'},
+                    files={'fileToUpload': (filename, f)},
+                    timeout=600,
+                )
+            if resp.status_code == 200 and resp.text.strip().startswith('http'):
+                link = resp.text.strip()
+                logger.info(f"Uploaded to catbox.moe: {link}")
+                return link
+        except Exception as e:
+            logger.warning(f"catbox.moe upload failed: {e}")
 
-    # ── 2. Pixeldrain — fallback: no size limit, direct download ─────────────
+    # ── 2. transfer.sh — unlimited size, seedha direct download link ──────────
+    link = _try_transfersh(file_path, filename, timeout=600)
+    if link:
+        return link
+
+    # ── 3. Pixeldrain — fallback: 10GB limit, direct download ────────────────
     try:
         with open(file_path, 'rb') as f:
             resp = requests.post(
@@ -310,34 +341,88 @@ def _upload_to_filehost(file_path: str) -> Optional[str]:
                 timeout=600,
             )
         if resp.status_code == 201:
-            data = resp.json()
-            file_id = data.get('id')
+            file_id = resp.json().get('id')
             if file_id:
-                # ?download parameter se seedha browser mein download shuru hoga
                 link = f'https://pixeldrain.com/api/file/{file_id}?download'
                 logger.info(f"Uploaded to pixeldrain: {link}")
                 return link
     except Exception as e:
         logger.warning(f"pixeldrain upload failed: {e}")
 
-    # ── 3. GoFile.io — last resort (page link, login required ho sakta hai) ──
+    # ── 4. GoFile.io — last resort ────────────────────────────────────────────
     try:
-        # New GoFile API (2024+)
-        up_resp = requests.post(
-            'https://store1.gofile.io/contents/uploadFile',
-            files={'file': (filename, open(file_path, 'rb'))},
-            timeout=600,
-        )
-        up_data = up_resp.json()
-        if up_data.get('status') == 'ok':
-            link = up_data['data'].get('downloadPage') or up_data['data'].get('fileId')
-            if link:
-                logger.info(f"Uploaded to GoFile.io: {link}")
-                return link
+        with open(file_path, 'rb') as f:
+            resp = requests.post(
+                'https://store1.gofile.io/contents/uploadFile',
+                files={'file': (filename, f)},
+                timeout=600,
+            )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get('status') == 'ok':
+                link = data['data'].get('downloadPage', '')
+                if link:
+                    logger.info(f"Uploaded to GoFile.io: {link}")
+                    return link
     except Exception as e:
         logger.warning(f"GoFile.io upload failed: {e}")
 
     logger.error("All filehost uploads failed!")
+    return None
+
+
+def _upload_to_filehost_large(file_path: str) -> Optional[str]:
+    """
+    190MB se badi files ke liye — catbox skip.
+    Order: 1) transfer.sh (unlimited, direct download — BEST)
+            2) Pixeldrain  (10GB, direct download)
+            3) GoFile.io   (last resort)
+    """
+    filename = os.path.basename(file_path)
+    file_mb  = os.path.getsize(file_path) / (1024 * 1024)
+    logger.info(f"Large file upload ({filename}, {file_mb:.1f} MB) — catbox skip...")
+
+    # ── 1. transfer.sh — unlimited size, seedha direct link ───────────────────
+    link = _try_transfersh(file_path, filename, timeout=900)
+    if link:
+        return link
+
+    # ── 2. Pixeldrain — 10GB limit, direct download ───────────────────────────
+    try:
+        with open(file_path, "rb") as f:
+            resp = requests.post(
+                f"https://pixeldrain.com/api/file/{filename}",
+                files={"file": (filename, f)},
+                timeout=900,
+            )
+        if resp.status_code == 201:
+            file_id = resp.json().get("id")
+            if file_id:
+                link = f"https://pixeldrain.com/api/file/{file_id}?download"
+                logger.info(f"Large file uploaded to pixeldrain: {link}")
+                return link
+    except Exception as e:
+        logger.warning(f"pixeldrain large upload failed: {e}")
+
+    # ── 3. GoFile.io — last resort ────────────────────────────────────────────
+    try:
+        with open(file_path, "rb") as f:
+            resp = requests.post(
+                "https://store1.gofile.io/contents/uploadFile",
+                files={"file": (filename, f)},
+                timeout=900,
+            )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("status") == "ok":
+                link = data["data"].get("downloadPage", "")
+                if link:
+                    logger.info(f"Large file uploaded to GoFile: {link}")
+                    return link
+    except Exception as e:
+        logger.warning(f"GoFile large upload failed: {e}")
+
+    logger.error("Large file: all uploads failed!")
     return None
 
 
@@ -941,14 +1026,52 @@ async def do_download(
                 if file_size_mb > MAX_FILE_SIZE_MB:
                     # ── Large file (>50MB): upload to filehost, give download link
                     quality_label = "🎵 MP3" if height == 0 else f"🎬 {height}p"
+
+                    # ── Progress updater: har 30 sec mein status update ────────
+                    upload_done  = asyncio.Event()
+                    upload_start = asyncio.get_event_loop().time()
+
+                    async def _update_progress():
+                        dots = 1
+                        while not upload_done.is_set():
+                            await asyncio.sleep(30)
+                            if upload_done.is_set():
+                                break
+                            elapsed = int(asyncio.get_event_loop().time() - upload_start)
+                            mins, secs = divmod(elapsed, 60)
+                            try:
+                                await status_msg.edit_text(
+                                    f"☁️ *File {file_size_mb:.1f} MB upload ho rahi hai...*\n"
+                                    f"⏳ *{mins}m {secs}s* ho gaye — please wait...\n"
+                                    f"_(Badi files mein 5-10 min lagte hain)_",
+                                    parse_mode=ParseMode.MARKDOWN,
+                                )
+                            except Exception:
+                                pass
+                            dots += 1
+
                     if status_msg:
                         await status_msg.edit_text(
                             f"☁️ *File {file_size_mb:.1f} MB hai*\n"
-                            f"⬆️ *Server pe upload ho rahi hai — please wait...*",
+                            f"⬆️ *Server pe upload ho rahi hai — please wait...*\n"
+                            f"_(Har 30 sec mein update milega)_",
                             parse_mode=ParseMode.MARKDOWN,
                         )
-                    # Upload to free filehost — proper download link milega
-                    hosted_url = await asyncio.to_thread(_upload_to_filehost, file_path)
+
+                    progress_task = asyncio.create_task(_update_progress())
+
+                    # 190MB se badi files ke liye catbox skip karo (200MB limit hai)
+                    if file_size_mb > 190:
+                        hosted_url = await asyncio.to_thread(_upload_to_filehost_large, file_path)
+                    else:
+                        hosted_url = await asyncio.to_thread(_upload_to_filehost, file_path)
+
+                    upload_done.set()
+                    try:
+                        progress_task.cancel()
+                    except Exception:
+                        pass
+
                     if hosted_url:
                         kb = [[InlineKeyboardButton(
                             "⬇️ Download Karo",
