@@ -2694,11 +2694,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from telegram.error import Conflict, NetworkError
 
     if isinstance(context.error, Conflict):
-        logger.warning(
-            "⚠️ Conflict: Another bot instance is polling. "
-            "Is instance ko band kar rahe hain..."
-        )
-        asyncio.create_task(context.application.stop())
+        logger.warning("⚠️ Conflict error — webhook mode mein yeh nahi aana chahiye!")
         return
 
     if isinstance(context.error, NetworkError):
@@ -2736,14 +2732,36 @@ def main():
     init_db()
     startup_check()
 
+    PORT        = int(os.environ.get("PORT", 8443))
+    WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "").rstrip("/")
+
+    if not WEBHOOK_URL:
+        logger.error(
+            "❌ WEBHOOK_URL environment variable missing!\n"
+            "   Railway dashboard → Variables → Add:\n"
+            "   WEBHOOK_URL = https://<your-app-name>.up.railway.app"
+        )
+        raise SystemExit(1)
+
     async def _post_init(app):
         global _global_dl_semaphore
-        logger.info("Startup delay (3s) — waiting for any previous instance to stop...")
-        await asyncio.sleep(3)
         _global_dl_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
         logger.info(f"Download semaphore initialised (limit={MAX_CONCURRENT_DOWNLOADS})")
+        await app.bot.delete_webhook(drop_pending_updates=True)
+        webhook_endpoint = f"{WEBHOOK_URL}/webhook/{BOT_TOKEN}"
+        await app.bot.set_webhook(
+            url=webhook_endpoint,
+            allowed_updates=Update.ALL_TYPES,
+            drop_pending_updates=True,
+        )
+        logger.info(f"✅ Webhook set → {webhook_endpoint}")
 
     async def _post_shutdown(app):
+        try:
+            await app.bot.delete_webhook()
+            logger.info("Webhook deleted on shutdown.")
+        except Exception:
+            pass
         count = 0
         for d in glob.glob("/tmp/tmp*"):
             if os.path.isdir(d):
@@ -2791,8 +2809,13 @@ def main():
 
     application.add_error_handler(error_handler)
 
-    logger.info("🚀 Bot v4.0 is starting...")
-    application.run_polling(
+    logger.info(f"🚀 Bot v4.0 starting in WEBHOOK mode on port {PORT}...")
+
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=f"/webhook/{BOT_TOKEN}",
+        webhook_url=f"{WEBHOOK_URL}/webhook/{BOT_TOKEN}",
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=True,
         close_loop=False,
