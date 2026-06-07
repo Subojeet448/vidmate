@@ -505,6 +505,16 @@ class DownloadManager:
         if os.path.exists("cookies.txt"):
             ydl_opts["cookiefile"] = "cookies.txt"
 
+        # YouTube specific — use TV client to bypass login requirement on cloud IPs
+        url_lower = url.lower()
+        if "youtube.com" in url_lower or "youtu.be" in url_lower:
+            ydl_opts["extractor_args"] = {
+                "youtube": {
+                    "player_client": ["tv_embedded", "web"],
+                    "player_skip": ["webpage", "configs"],
+                }
+            }
+
         if extract_audio:
             ydl_opts.update({
                 "format": "bestaudio/best",
