@@ -392,6 +392,14 @@ class DownloadManager:
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
+            "socket_timeout": 30,
+            "http_headers": {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+            },
         }
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -478,6 +486,17 @@ class DownloadManager:
             "extract_flat": False,
             "noplaylist": True,
             "outtmpl": f"{download_dir}/%(title)s.%(ext)s",
+            "socket_timeout": 60,
+            "retries": 5,
+            "fragment_retries": 5,
+            "http_headers": {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+            },
+            "concurrent_fragment_downloads": 4,
         }
 
         if extract_audio:
@@ -556,6 +575,10 @@ class DownloadManager:
                                                     return None, "region_blocked", None, None
             if "login" in err or "sign in" in err or "authentication" in err:
                                                     return None, "login_required", None, None
+            if "too many" in err or "rate limit" in err or "429" in err:
+                                                    return None, "rate_limited",   None, None
+            # Log full error for unknown cases
+            logger.error(f"yt-dlp unknown error full: {e}")
             return None, "unknown", None, None
 
     async def fetch_formats(self, url: str) -> dict:
@@ -581,7 +604,7 @@ class DownloadManager:
             try:
                 result = await asyncio.wait_for(
                     asyncio.to_thread(self._blocking_download, url, download_dir, height),
-                    timeout=300,
+                    timeout=600,  # 10 min for long videos
                 )
             except asyncio.TimeoutError:
                 result = (None, "timeout", None, None)
@@ -754,6 +777,7 @@ async def do_download(
                         "region_blocked":  "❌ *Region blocked.*",
                         "login_required":  "❌ *Login required.*",
                         "timeout":         "❌ *Download timed out.*\nTry a shorter video or lower quality.",
+                        "rate_limited":    "❌ *Rate limited by platform.*\nWait a few minutes and try again.",
                         "unknown":         "❌ *Download failed.*\nCheck the URL and try again.",
                     }
                     if status_msg:
