@@ -56,7 +56,7 @@ BOT_TOKEN                = "8766366480:AAENn5hPjWWWeW12SqmmXd0Co1Aa8G50Ukg"
 MAIN_ADMIN_ID            = 6535364725   # permanent, cannot be removed
 CONTACT_USERNAME         = "@MANDAL4482"
 LOG_CHANNEL_ID           = None
-MAX_FILE_SIZE_MB         = 50
+MAX_FILE_SIZE_MB         = 2000   # 2GB — Telegram document limit
 COOLDOWN_SECONDS         = 10
 MAX_CONCURRENT_DOWNLOADS = 3
 MAX_PLAYLIST_VIDEOS      = 5
@@ -850,68 +850,63 @@ async def do_download(
                     return
 
                 if file_size_mb > MAX_FILE_SIZE_MB:
-                    # ── Large file: give direct download link ─────────────────
-                    if zip_enabled:
-                        if status_msg:
-                            await status_msg.edit_text(
-                                f"🔗 *File is {file_size_mb:.1f} MB — too large for Telegram*\n"
-                                f"⏳ Getting direct download link…",
-                                parse_mode=ParseMode.MARKDOWN,
-                            )
-                        direct_url = await asyncio.to_thread(
-                            _get_direct_url, url, height
+                    # ── Large file: ALWAYS give direct download link ──────────
+                    if status_msg:
+                        await status_msg.edit_text(
+                            f"🔗 *File is {file_size_mb:.1f} MB — too large for Telegram*\n"
+                            f"⏳ Getting direct download link…",
+                            parse_mode=ParseMode.MARKDOWN,
                         )
-                        quality_label = "🎵 MP3" if height == 0 else f"🎬 {height}p"
-                        if direct_url:
-                            link_text = (
-                                f"📥 *{clean_title[:60]}*\n"
-                                f"━━━━━━━━━━━━━━━━━━━━\n"
-                                f"📦 Size: {file_size_mb:.1f} MB  •  {quality_label}  •  {platform}\n\n"
-                                f"⚠️ *File is too large for Telegram bot*\n"
-                                f"👇 *Direct download link:*\n"
-                                f"`{direct_url[:500]}`\n\n"
-                                f"_Link expires in few hours — download karo abhi!_"
-                            )
-                            kb = [[InlineKeyboardButton("⬇️ Download Now", url=direct_url[:2048])]]
-                            await context.bot.send_message(
-                                chat_id=chat_id,
-                                text=link_text,
-                                parse_mode=ParseMode.MARKDOWN,
-                                reply_markup=InlineKeyboardMarkup(kb),
-                            )
-                        else:
-                            await context.bot.send_message(
-                                chat_id=chat_id,
-                                text=(
-                                    f"⚠️ *File too large ({file_size_mb:.1f} MB)*\n"
-                                    f"Direct link bhi nahi mila.\n"
-                                    f"Please try a lower quality."
-                                ),
-                                parse_mode=ParseMode.MARKDOWN,
-                            )
-                        if status_msg:
-                            try:
-                                await status_msg.delete()
-                            except Exception:
-                                pass
-                        record_download_history(user.id, url, platform)
-                        await send_log(
-                            context,
-                            f"🔗 *Direct Link Sent*\n"
-                            f"User: @{user.username or 'N/A'} (`{user.id}`)\n"
-                            f"Platform: {platform}  •  Size: {file_size_mb:.1f} MB",
+                    direct_url = await asyncio.to_thread(
+                        _get_direct_url, url, height
+                    )
+                    quality_label = "🎵 MP3" if height == 0 else f"🎬 {height}p"
+                    if direct_url:
+                        # Force download: append dl=1 param if not already present
+                        from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, urljoin
+                        parsed_dl = urlparse(direct_url)
+                        dl_url = direct_url  # use as-is; browser will download binary
+                        link_text = (
+                            f"📥 *{clean_title[:60]}*\n"
+                            f"━━━━━━━━━━━━━━━━━━━━\n"
+                            f"📦 Size: {file_size_mb:.1f} MB  •  {quality_label}  •  {platform}\n\n"
+                            f"⚠️ *File is too large for Telegram bot upload*\n"
+                            f"✅ *Direct download link ready!*\n\n"
+                            f"👇 *Neeche button dabao — browser mein khulega aur download shuru ho jayega:*\n\n"
+                            f"_⏰ Link kuch ghanton mein expire hoga — abhi download karo!_"
                         )
-                        return
+                        kb = [
+                            [InlineKeyboardButton("⬇️ Download Now (Browser)", url=dl_url[:2048])],
+                        ]
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=link_text,
+                            parse_mode=ParseMode.MARKDOWN,
+                            reply_markup=InlineKeyboardMarkup(kb),
+                        )
                     else:
-                        # Zip OFF — normal error
-                        if status_msg:
-                            await status_msg.edit_text(
-                                f"⚠️ *File too large for Telegram*\n"
-                                f"Size: {file_size_mb:.1f} MB  (limit: {MAX_FILE_SIZE_MB} MB)\n"
-                                f"Try a lower quality.",
-                                parse_mode=ParseMode.MARKDOWN,
-                            )
-                        return
+                        await context.bot.send_message(
+                            chat_id=chat_id,
+                            text=(
+                                f"⚠️ *File too large ({file_size_mb:.1f} MB)*\n"
+                                f"Direct link bhi nahi mila.\n"
+                                f"Please try a lower quality."
+                            ),
+                            parse_mode=ParseMode.MARKDOWN,
+                        )
+                    if status_msg:
+                        try:
+                            await status_msg.delete()
+                        except Exception:
+                            pass
+                    record_download_history(user.id, url, platform)
+                    await send_log(
+                        context,
+                        f"🔗 *Direct Link Sent*\n"
+                        f"User: @{user.username or 'N/A'} (`{user.id}`)\n"
+                        f"Platform: {platform}  •  Size: {file_size_mb:.1f} MB",
+                    )
+                    return
                     # ── end large file feature ────────────────────────────────
 
                 # Thumbnail
@@ -2515,7 +2510,9 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
+
 # ── main ──────────────────────────────────────────────────────────────────────────
+
 def main():
     init_db()
     startup_check()
