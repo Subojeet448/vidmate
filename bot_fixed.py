@@ -277,46 +277,73 @@ def _force_download_url(cdn_url: str) -> str:
 
 def _upload_to_filehost(file_path: str) -> Optional[str]:
     """
-    File ko 0x0.st pe upload karo — wahan se proper download link milta hai.
-    Fallback: file.io
-    Max size: 0x0.st = 512MB, file.io = 2GB
+    GoFile.io pe upload karo — anonymous, unlimited size, proper download button.
+    API: 1) getServer se best server lo  2) us server pe file upload karo
+    Fallback: catbox.moe (200MB limit), pixeldrain.com
     """
-    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
     filename = os.path.basename(file_path)
+    logger.info(f"Uploading {filename} to filehost...")
 
-    # Try 0x0.st first (simple, reliable, direct download link)
+    # ── 1. GoFile.io — BEST: unlimited size, no signup, download button ──────
+    try:
+        # Step 1: Get best upload server
+        srv_resp = requests.get('https://api.gofile.io/servers', timeout=15)
+        srv_data = srv_resp.json()
+        if srv_data.get('status') == 'ok':
+            server = srv_data['data']['servers'][0]['name']
+        else:
+            server = 'store1'  # fallback server name
+
+        # Step 2: Upload to that server
+        with open(file_path, 'rb') as f:
+            up_resp = requests.post(
+                f'https://{server}.gofile.io/uploadFile',
+                files={'file': (filename, f)},
+                timeout=600,
+            )
+        up_data = up_resp.json()
+        if up_data.get('status') == 'ok':
+            link = up_data['data']['downloadPage']
+            logger.info(f"Uploaded to GoFile.io: {link}")
+            return link
+    except Exception as e:
+        logger.warning(f"GoFile.io upload failed: {e}")
+
+    # ── 2. Catbox.moe — fallback (200MB limit, permanent) ────────────────────
     try:
         with open(file_path, 'rb') as f:
             resp = requests.post(
-                'https://0x0.st',
-                files={'file': (filename, f)},
-                timeout=300,
+                'https://catbox.moe/user/api.php',
+                data={'reqtype': 'fileupload'},
+                files={'fileToUpload': (filename, f)},
+                timeout=600,
             )
         if resp.status_code == 200 and resp.text.strip().startswith('http'):
             link = resp.text.strip()
-            logger.info(f"Uploaded to 0x0.st: {link}")
+            logger.info(f"Uploaded to catbox.moe: {link}")
             return link
     except Exception as e:
-        logger.warning(f"0x0.st upload failed: {e}")
+        logger.warning(f"catbox.moe upload failed: {e}")
 
-    # Fallback: file.io (one-time download link)
+    # ── 3. Pixeldrain — fallback (no size limit, direct download) ────────────
     try:
         with open(file_path, 'rb') as f:
             resp = requests.post(
-                'https://file.io',
+                f'https://pixeldrain.com/api/file/{filename}',
                 files={'file': (filename, f)},
-                data={'expires': '1d'},
-                timeout=300,
+                timeout=600,
             )
-        if resp.status_code == 200:
+        if resp.status_code == 201:
             data = resp.json()
-            if data.get('success') and data.get('link'):
-                link = data['link']
-                logger.info(f"Uploaded to file.io: {link}")
+            file_id = data.get('id')
+            if file_id:
+                link = f'https://pixeldrain.com/u/{file_id}'
+                logger.info(f"Uploaded to pixeldrain: {link}")
                 return link
     except Exception as e:
-        logger.warning(f"file.io upload failed: {e}")
+        logger.warning(f"pixeldrain upload failed: {e}")
 
+    logger.error("All filehost uploads failed!")
     return None
 
 
@@ -2633,7 +2660,7 @@ def main():
     application.add_error_handler(error_handler)
 
     logger.info("🚀 Bot v4.0 is starting...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
