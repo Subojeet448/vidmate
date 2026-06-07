@@ -277,39 +277,15 @@ def _force_download_url(cdn_url: str) -> str:
 
 def _upload_to_filehost(file_path: str) -> Optional[str]:
     """
-    GoFile.io pe upload karo — anonymous, unlimited size, proper download button.
-    API: 1) getServer se best server lo  2) us server pe file upload karo
-    Fallback: catbox.moe (200MB limit), pixeldrain.com
+    File ko free filehost pe upload karo — direct download link milega.
+    Order: 1) Catbox.moe (direct link, 200MB limit)
+            2) Pixeldrain (no size limit, direct download)
+            3) GoFile.io (page link — last resort)
     """
     filename = os.path.basename(file_path)
     logger.info(f"Uploading {filename} to filehost...")
 
-    # ── 1. GoFile.io — BEST: unlimited size, no signup, download button ──────
-    try:
-        # Step 1: Get best upload server
-        srv_resp = requests.get('https://api.gofile.io/servers', timeout=15)
-        srv_data = srv_resp.json()
-        if srv_data.get('status') == 'ok':
-            server = srv_data['data']['servers'][0]['name']
-        else:
-            server = 'store1'  # fallback server name
-
-        # Step 2: Upload to that server
-        with open(file_path, 'rb') as f:
-            up_resp = requests.post(
-                f'https://{server}.gofile.io/uploadFile',
-                files={'file': (filename, f)},
-                timeout=600,
-            )
-        up_data = up_resp.json()
-        if up_data.get('status') == 'ok':
-            link = up_data['data']['downloadPage']
-            logger.info(f"Uploaded to GoFile.io: {link}")
-            return link
-    except Exception as e:
-        logger.warning(f"GoFile.io upload failed: {e}")
-
-    # ── 2. Catbox.moe — fallback (200MB limit, permanent) ────────────────────
+    # ── 1. Catbox.moe — BEST: direct download link, permanent, 200MB ─────────
     try:
         with open(file_path, 'rb') as f:
             resp = requests.post(
@@ -325,7 +301,7 @@ def _upload_to_filehost(file_path: str) -> Optional[str]:
     except Exception as e:
         logger.warning(f"catbox.moe upload failed: {e}")
 
-    # ── 3. Pixeldrain — fallback (no size limit, direct download) ────────────
+    # ── 2. Pixeldrain — fallback: no size limit, direct download ─────────────
     try:
         with open(file_path, 'rb') as f:
             resp = requests.post(
@@ -337,11 +313,29 @@ def _upload_to_filehost(file_path: str) -> Optional[str]:
             data = resp.json()
             file_id = data.get('id')
             if file_id:
-                link = f'https://pixeldrain.com/u/{file_id}'
+                # ?download parameter se seedha browser mein download shuru hoga
+                link = f'https://pixeldrain.com/api/file/{file_id}?download'
                 logger.info(f"Uploaded to pixeldrain: {link}")
                 return link
     except Exception as e:
         logger.warning(f"pixeldrain upload failed: {e}")
+
+    # ── 3. GoFile.io — last resort (page link, login required ho sakta hai) ──
+    try:
+        # New GoFile API (2024+)
+        up_resp = requests.post(
+            'https://store1.gofile.io/contents/uploadFile',
+            files={'file': (filename, open(file_path, 'rb'))},
+            timeout=600,
+        )
+        up_data = up_resp.json()
+        if up_data.get('status') == 'ok':
+            link = up_data['data'].get('downloadPage') or up_data['data'].get('fileId')
+            if link:
+                logger.info(f"Uploaded to GoFile.io: {link}")
+                return link
+    except Exception as e:
+        logger.warning(f"GoFile.io upload failed: {e}")
 
     logger.error("All filehost uploads failed!")
     return None
@@ -2574,6 +2568,21 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Error handler ─────────────────────────────────────────────────────────────────
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import traceback
+    from telegram.error import Conflict, NetworkError
+
+    # ── Fix: Conflict = dusra instance chal raha hai Railway pe ──────────────
+    if isinstance(context.error, Conflict):
+        logger.warning(
+            "⚠️ Conflict: Another bot instance is polling. "
+            "This instance will stop polling. Railway redeploy ke baad theek ho jayega."
+        )
+        return  # User ko message mat bhejo, silently ignore karo
+
+    # ── Transient network errors — log karo, user ko mat batao ───────────────
+    if isinstance(context.error, NetworkError):
+        logger.warning(f"NetworkError (transient): {context.error}")
+        return
+
     tb_str = "".join(
         traceback.format_exception(type(context.error), context.error, context.error.__traceback__)
     )
@@ -2607,6 +2616,10 @@ def main():
 
     async def _post_init(app):
         global _global_dl_semaphore
+        # ── Fix: Railway redeploy mein old instance 3-5 sec tak chal sakta hai ──
+        # Thoda wait karo taake dono instances ek saath poll na karein
+        logger.info("Startup delay (3s) — waiting for any previous instance to stop...")
+        await asyncio.sleep(3)
         _global_dl_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
         logger.info(f"Download semaphore initialised (limit={MAX_CONCURRENT_DOWNLOADS})")
 
