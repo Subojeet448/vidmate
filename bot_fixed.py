@@ -2733,15 +2733,7 @@ def main():
     startup_check()
 
     PORT        = int(os.environ.get("PORT", 8443))
-    WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "").rstrip("/")
-
-    if not WEBHOOK_URL:
-        logger.error(
-            "❌ WEBHOOK_URL environment variable missing!\n"
-            "   Railway dashboard → Variables → Add:\n"
-            "   WEBHOOK_URL = https://<your-app-name>.up.railway.app"
-        )
-        raise SystemExit(1)
+    WEBHOOK_URL = "https://vidmate-production-9750.up.railway.app"
 
     async def _post_init(app):
         global _global_dl_semaphore
