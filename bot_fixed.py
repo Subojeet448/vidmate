@@ -1024,90 +1024,98 @@ async def do_download(
                     return
 
                 if file_size_mb > MAX_FILE_SIZE_MB:
-                    # ── Large file (>50MB): upload to filehost, give download link
+                    # ── Large file (>50MB): ZIP banao + Telegram document bhejo + direct link ──
                     quality_label = "🎵 MP3" if height == 0 else f"🎬 {height}p"
-
-                    # ── Progress updater: har 30 sec mein status update ────────
-                    upload_done  = asyncio.Event()
-                    upload_start = asyncio.get_event_loop().time()
-
-                    async def _update_progress():
-                        dots = 1
-                        while not upload_done.is_set():
-                            await asyncio.sleep(30)
-                            if upload_done.is_set():
-                                break
-                            elapsed = int(asyncio.get_event_loop().time() - upload_start)
-                            mins, secs = divmod(elapsed, 60)
-                            try:
-                                await status_msg.edit_text(
-                                    f"☁️ *File {file_size_mb:.1f} MB upload ho rahi hai...*\n"
-                                    f"⏳ *{mins}m {secs}s* ho gaye — please wait...\n"
-                                    f"_(Badi files mein 5-10 min lagte hain)_",
-                                    parse_mode=ParseMode.MARKDOWN,
-                                )
-                            except Exception:
-                                pass
-                            dots += 1
 
                     if status_msg:
                         await status_msg.edit_text(
-                            f"☁️ *File {file_size_mb:.1f} MB hai*\n"
-                            f"⬆️ *Server pe upload ho rahi hai — please wait...*\n"
-                            f"_(Har 30 sec mein update milega)_",
+                            f"📦 *ZIP ban rahi hai...*\n"
+                            f"📏 Size: {file_size_mb:.1f} MB  •  {quality_label}",
                             parse_mode=ParseMode.MARKDOWN,
                         )
 
-                    progress_task = asyncio.create_task(_update_progress())
+                    # ── ZIP file banao ────────────────────────────────────────
+                    zip_filename = f"{clean_title[:40]}.zip"
+                    zip_path = os.path.join(temp_dir, zip_filename)
 
-                    # 190MB se badi files ke liye catbox skip karo (200MB limit hai)
-                    if file_size_mb > 190:
-                        hosted_url = await asyncio.to_thread(_upload_to_filehost_large, file_path)
-                    else:
-                        hosted_url = await asyncio.to_thread(_upload_to_filehost, file_path)
+                    def _make_zip():
+                        import zipfile
+                        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                            zf.write(file_path, os.path.basename(file_path))
+                        return os.path.getsize(zip_path) / (1024 * 1024)
 
-                    upload_done.set()
+                    zip_size_mb = await asyncio.to_thread(_make_zip)
+
+                    # ── Direct URL bhi lo (backup link) ──────────────────────
+                    direct_url = await asyncio.to_thread(_get_direct_url, url, height)
+
+                    caption = (
+                        f"📥 *{clean_title[:60]}*\n"
+                        f"━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📦 {file_size_mb:.1f} MB  •  {quality_label}  •  {platform}\n"
+                        f"🗜️ ZIP size: {zip_size_mb:.1f} MB\n\n"
+                        f"⬇️ *Download karne ke liye file pe tap karo!*"
+                    )
+
+                    if status_msg:
+                        await status_msg.edit_text(
+                            f"⬆️ *Telegram pe bhej raha hoon...*",
+                            parse_mode=ParseMode.MARKDOWN,
+                        )
+
+                    # ── Telegram document ke taur pe bhejo ───────────────────
+                    kb = []
+                    if direct_url:
+                        kb = [[InlineKeyboardButton("🔗 Direct Link (Backup)", url=direct_url)]]
+
                     try:
-                        progress_task.cancel()
-                    except Exception:
-                        pass
+                        with open(zip_path, "rb") as zf:
+                            await context.bot.send_document(
+                                chat_id=chat_id,
+                                document=zf,
+                                filename=zip_filename,
+                                caption=caption,
+                                parse_mode=ParseMode.MARKDOWN,
+                                reply_markup=InlineKeyboardMarkup(kb) if kb else None,
+                                read_timeout=600,
+                                write_timeout=600,
+                                connect_timeout=30,
+                                pool_timeout=600,
+                            )
+                    except Exception as e:
+                        logger.error(f"ZIP document send failed: {e}")
+                        # ZIP fail hua — sirf direct link do
+                        if direct_url:
+                            kb2 = [[InlineKeyboardButton("⬇️ Direct Download Karo", url=direct_url)]]
+                            await context.bot.send_message(
+                                chat_id=chat_id,
+                                text=(
+                                    f"📥 *{clean_title[:60]}*\n"
+                                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"📦 {file_size_mb:.1f} MB  •  {quality_label}  •  {platform}\n\n"
+                                    f"⚠️ ZIP send nahi hua — direct link use karo:\n"
+                                ),
+                                parse_mode=ParseMode.MARKDOWN,
+                                reply_markup=InlineKeyboardMarkup(kb2),
+                            )
+                        else:
+                            await context.bot.send_message(
+                                chat_id=chat_id,
+                                text=f"❌ *File {file_size_mb:.1f} MB — send nahi ho saki.*\nLower quality try karo.",
+                                parse_mode=ParseMode.MARKDOWN,
+                            )
 
-                    if hosted_url:
-                        kb = [[InlineKeyboardButton(
-                            "⬇️ Download Karo",
-                            url=hosted_url
-                        )]]
-                        await context.bot.send_message(
-                            chat_id=chat_id,
-                            text=(
-                                f"📥 *{clean_title[:60]}*\n"
-                                f"━━━━━━━━━━━━━━━━━━━━\n"
-                                f"📦 {file_size_mb:.1f} MB  •  {quality_label}  •  {platform}\n\n"
-                                f"✅ *Download link ready hai!*\n"
-                                f"👇 *Button dabao — seedha download shuru hoga*\n\n"
-                                f"_⏰ Link 24 ghante mein expire hoga_"
-                            ),
-                            parse_mode=ParseMode.MARKDOWN,
-                            reply_markup=InlineKeyboardMarkup(kb),
-                        )
-                    else:
-                        await context.bot.send_message(
-                            chat_id=chat_id,
-                            text=(
-                                f"⚠️ *File {file_size_mb:.1f} MB hai*\n"
-                                f"Upload nahi ho saki. Lower quality try karo."
-                            ),
-                            parse_mode=ParseMode.MARKDOWN,
-                        )
                     if status_msg:
                         try:
                             await status_msg.delete()
                         except Exception:
                             pass
+                    user_manager.increment_downloads(user.id)
+                    db_add_usage(user.id, file_size_mb)
                     record_download_history(user.id, url, platform)
                     await send_log(
                         context,
-                        f"☁️ *Filehost Link Sent*\n"
+                        f"📦 *ZIP Sent*\n"
                         f"User: @{user.username or 'N/A'} (`{user.id}`)\n"
                         f"Platform: {platform}  •  Size: {file_size_mb:.1f} MB",
                     )
@@ -2530,7 +2538,6 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏱️ Uptime: {uptime}",
         parse_mode=ParseMode.MARKDOWN,
     )
-
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
