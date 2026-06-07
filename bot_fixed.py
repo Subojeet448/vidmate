@@ -2508,6 +2508,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ── main ──────────────────────────────────────────────────────────────────────────
+# ── main ──────────────────────────────────────────────────────────────────────────
 def main():
     init_db()
     startup_check()
@@ -2515,4 +2516,50 @@ def main():
     async def _post_init(app):
         global _global_dl_semaphore
         _global_dl_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
-        logger.info(f"Download semaphore initialised (limit={MA
+        logger.info(f"Download semaphore initialised (limit={MAX_CONCURRENT_DOWNLOADS})")
+
+    async def _post_shutdown(app):
+        count = 0
+        for d in glob.glob("/tmp/tmp*"):
+            if os.path.isdir(d):
+                shutil.rmtree(d, ignore_errors=True)
+                count += 1
+        logger.info(f"Shutdown: cleaned {count} temp dirs")
+        print(f"\n✅ Bot offline — {count} temp dirs cleaned.\n")
+
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(_post_init)
+        .post_shutdown(_post_shutdown)
+        .build()
+    )
+
+    application.add_handler(CommandHandler("start",       start))
+    application.add_handler(CommandHandler("admin",       admin_panel))
+    application.add_handler(CommandHandler("stats",       stats_command))
+    application.add_handler(CommandHandler("broadcast",   broadcast_command))
+    application.add_handler(CommandHandler("ban",         ban_command))
+    application.add_handler(CommandHandler("unban",       unban_command))
+    application.add_handler(CommandHandler("addadmin",    addadmin_command))
+    application.add_handler(CommandHandler("removeadmin", removeadmin_command))
+    application.add_handler(CommandHandler("setlimit",    setlimit_command))
+    application.add_handler(CommandHandler("resetusage",  resetusage_command))
+    application.add_handler(CommandHandler("cancel",      cancel_command))
+
+    application.add_handler(CallbackQueryHandler(button_handler))
+
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(MessageHandler(
+        filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.VOICE,
+        handle_message,
+    ))
+
+    application.add_error_handler(error_handler)
+
+    logger.info("🚀 Bot v4.0 is starting...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
