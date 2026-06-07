@@ -155,6 +155,7 @@ def _default_data() -> dict:
         "banner_file_id": None,
         "maintenance_mode": False,
         "download_history": [],
+        "zip_enabled": False,
     }
 
 def load_data() -> dict:
@@ -181,6 +182,7 @@ force_channels   = bot_data.get("force_channels", [])
 BANNER_URL       = bot_data.get("banner_url")
 BANNER_FILE_ID   = bot_data.get("banner_file_id")
 maintenance_mode = bot_data.get("maintenance_mode", False)
+zip_enabled      = bot_data.get("zip_enabled", False)
 
 # ── Admin helpers ─────────────────────────────────────────────────────────────────
 def is_admin(user_id: int) -> bool:
@@ -258,6 +260,12 @@ def format_size(mb: float) -> str:
     if mb >= 1024:
         return f"{mb/1024:.1f} GB"
     return f"{mb:.1f} MB"
+
+def _make_zip(source_path: str, zip_path: str):
+    """Blocking helper: creates a zip archive of source_path at zip_path."""
+    import zipfile
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=5) as zf:
+        zf.write(source_path, arcname=os.path.basename(source_path))
 
 def estimate_wait(duration_seconds: int) -> str:
     if duration_seconds <= 60:
@@ -401,9 +409,6 @@ class DownloadManager:
                 ),
             },
         }
-        # Load cookies.txt if available (helps bypass YouTube IP ban on cloud servers)
-        if os.path.exists("cookies.txt"):
-            opts["cookiefile"] = "cookies.txt"
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -501,19 +506,6 @@ class DownloadManager:
             },
             "concurrent_fragment_downloads": 4,
         }
-        # Load cookies.txt if available
-        if os.path.exists("cookies.txt"):
-            ydl_opts["cookiefile"] = "cookies.txt"
-
-        # YouTube specific — use TV client to bypass login requirement on cloud IPs
-        url_lower = url.lower()
-        if "youtube.com" in url_lower or "youtu.be" in url_lower:
-            ydl_opts["extractor_args"] = {
-                "youtube": {
-                    "player_client": ["tv_embedded", "web"],
-                    "player_skip": ["webpage", "configs"],
-                }
-            }
 
         if extract_audio:
             ydl_opts.update({
@@ -697,17 +689,6 @@ async def check_subscription(user_id: int, context: ContextTypes.DEFAULT_TYPE) -
 
 
 # ── Dynamic quality keyboard ──────────────────────────────────────────────────────
-def quality_keyboard() -> InlineKeyboardMarkup:
-    """Fixed quality options — v3.0 style, no pre-fetch needed."""
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📱 360p",  callback_data="dldyn_360"),
-         InlineKeyboardButton("💻 480p",  callback_data="dldyn_480")],
-        [InlineKeyboardButton("🖥️ 720p",  callback_data="dldyn_720"),
-         InlineKeyboardButton("🎵 MP3",   callback_data="dldyn_0")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_download")],
-    ])
-
-
 def build_quality_keyboard(formats: List[dict], url_key: str) -> InlineKeyboardMarkup:
     """
     FIX #7: filesize stored as bytes — divide by 1024*1024 to get MB. Was previously
@@ -844,14 +825,90 @@ async def do_download(
                     return
 
                 if file_size_mb > MAX_FILE_SIZE_MB:
-                    if status_msg:
-                        await status_msg.edit_text(
-                            f"⚠️ *File too large for Telegram*\n"
-                            f"Size: {file_size_mb:.1f} MB  (limit: {MAX_FILE_SIZE_MB} MB)\n"
-                            f"Try a lower quality.",
-                            parse_mode=ParseMode.MARKDOWN,
+                    # ── ZIP feature ──────────────────────────────────────────
+                    if zip_enabled:
+                        # Warn user
+                        if status_msg:
+                            await status_msg.edit_text(
+                                f"📦 *File is {file_size_mb:.1f} MB — zipping it for you!*\n"
+                                f"⏳ Please wait ~1 min…",
+                                parse_mode=ParseMode.MARKDOWN,
+                            )
+                        # Create zip in same temp_dir
+                        zip_path = file_path + ".zip"
+                        await asyncio.to_thread(_make_zip, file_path, zip_path)
+                        zip_size_mb = os.path.getsize(zip_path) / (1024 * 1024)
+
+                        if zip_size_mb > MAX_FILE_SIZE_MB:
+                            # Zip is still too big
+                            if status_msg:
+                                await status_msg.edit_text(
+                                    f"❌ *Zipped file is still too large ({zip_size_mb:.1f} MB).*\n"
+                                    f"Try a lower quality.",
+                                    parse_mode=ParseMode.MARKDOWN,
+                                )
+                            return
+
+                        # Check limit
+                        allowed, limit_mb2, used_mb2 = db_check_limit(user.id, zip_size_mb)
+                        if not allowed:
+                            if status_msg:
+                                await status_msg.edit_text(
+                                    f"🚫 *Download Limit Reached!*\n"
+                                    f"Your limit: {format_size(limit_mb2)}\n"
+                                    f"Used: {format_size(used_mb2)}\n"
+                                    f"This file: {format_size(zip_size_mb)}\n\n"
+                                    f"Contact admin {CONTACT_USERNAME} to increase your limit.",
+                                    parse_mode=ParseMode.MARKDOWN,
+                                )
+                            return
+
+                        if status_msg:
+                            await status_msg.edit_text(
+                                f"⬆️ *Uploading zip...*\n{platform}", parse_mode=ParseMode.MARKDOWN
+                            )
+
+                        user_manager.increment_downloads(user.id)
+                        db_add_usage(user.id, zip_size_mb)
+                        record_download_history(user.id, url, platform)
+
+                        zip_caption = (
+                            f"📦 *{clean_title[:60]}*\n"
+                            f"━━━━━━━━━━━━━━━━━━━━\n"
+                            f"🗜️ Zipped  •  {zip_size_mb:.1f} MB  •  {platform}\n"
+                            f"📊 Download #{bot_data['total_downloads']:,}"
                         )
-                    return
+                        with open(zip_path, "rb") as zf:
+                            await context.bot.send_document(
+                                chat_id=chat_id,
+                                document=zf,
+                                filename=os.path.basename(zip_path),
+                                caption=zip_caption,
+                                parse_mode=ParseMode.MARKDOWN,
+                                read_timeout=180,
+                                write_timeout=180,
+                            )
+
+                        if status_msg:
+                            await status_msg.edit_text("✅ *Done!*", parse_mode=ParseMode.MARKDOWN)
+                        await asyncio.sleep(1.5)
+                        if status_msg:
+                            try:
+                                await status_msg.delete()
+                            except Exception:
+                                pass
+                        return
+                    else:
+                        # Zip is OFF — show normal too-large error
+                        if status_msg:
+                            await status_msg.edit_text(
+                                f"⚠️ *File too large for Telegram*\n"
+                                f"Size: {file_size_mb:.1f} MB  (limit: {MAX_FILE_SIZE_MB} MB)\n"
+                                f"Try a lower quality.",
+                                parse_mode=ParseMode.MARKDOWN,
+                            )
+                        return
+                    # ── end ZIP feature ──────────────────────────────────────
 
                 # Thumbnail
                 thumb_path: Optional[str] = None
@@ -1279,7 +1336,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_manager.register_user(user.id, user.username, user.full_name)
 
     if query.data.startswith("admin_") or query.data.startswith("remove_channel_") \
-            or query.data.startswith("set_limit_") or query.data.startswith("manage_admin_"):
+            or query.data.startswith("set_limit_") or query.data.startswith("manage_admin_") \
+            or query.data == "admin_toggle_zip":
         if not is_admin(user.id):
             await query.message.reply_text(
                 "⛔ *Unauthorized!*", parse_mode=ParseMode.MARKDOWN
@@ -1524,15 +1582,52 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await do_playlist_download(update, context, url)
         return
 
-    # Simple fixed quality picker — no pre-fetch (faster & reliable like v3.0)
+    # Smart link: fetch formats + show info
+    fetching_msg = await update.message.reply_text(
+        "🔍 *Fetching video info...*", parse_mode=ParseMode.MARKDOWN
+    )
+
+    info = await download_manager.fetch_formats(url)
+    try:
+        await fetching_msg.delete()
+    except Exception:
+        pass
+
+    if not info.get("ok"):
+        await update.message.reply_text(
+            "❌ *Could not fetch video info.*\nCheck the URL and try again.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    title    = clean_filename(info["title"])
+    duration = info.get("duration", 0)
+    formats  = info.get("formats", [])
+    wait_str = estimate_wait(int(duration)) if duration else "unknown"
+    dur_str  = f"{int(duration)//60}:{int(duration)%60:02d}" if duration else "?"
+
+    quality_lines = ""
+    for fmt in formats:
+        if fmt["height"] > 0:
+            fs = fmt.get("filesize", 0)  # bytes
+            size_str = f"  •  ~{format_size(fs / 1024 / 1024)}" if fs else ""
+            quality_lines += f"  • {fmt['label']}{size_str}\n"
+
+    info_text = (
+        f"🎬 *{title[:60]}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"⏱️ Duration: {dur_str}  •  Est. wait: {wait_str}\n"
+        f"🌐 {detect_platform(url)}\n\n"
+        f"📺 *Available Qualities:*\n{quality_lines}\n"
+        f"👇 *Choose your quality:*"
+    )
+
     context.user_data["pending_url"] = url
 
     await update.message.reply_text(
-        f"🎬 *Choose Download Quality*\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🌐 {detect_platform(url)}",
+        info_text,
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=quality_keyboard(),
+        reply_markup=build_quality_keyboard(formats, url),
     )
 
     await send_log(
@@ -1554,7 +1649,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    global maintenance_mode
+    global maintenance_mode, zip_enabled
 
     total_users, total_downloads, active_today, uptime = user_manager.get_stats()
     verified_users = sum(1 for u in bot_data["users"].values() if u.get("verified"))
@@ -1594,6 +1689,12 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton(f"👑 Manage Admins ({extra_admins})", callback_data="admin_manage_admins"),
         ],
         [
+            InlineKeyboardButton(
+                f"📦 User Zip: {'🟢 ON' if zip_enabled else '🔴 OFF'}",
+                callback_data="admin_toggle_zip",
+            ),
+        ],
+        [
             InlineKeyboardButton("🔙 Main Menu",       callback_data="back_to_main"),
         ],
     ]
@@ -1614,6 +1715,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📥 Downloads: {total_downloads:,}   🟢 Today: {active_today}\n"
         f"⏱️ Uptime: {uptime}\n"
         f"🔧 Maintenance: {'🔴 ON' if maintenance_mode else '🟢 OFF'}\n"
+        f"📦 User Zip: {'🟢 ON' if zip_enabled else '🔴 OFF'}\n"
         f"🚫 Banned: {banned_count}  •  👑 Extra Admins: {extra_admins}\n"
         f"📢 Force Channels: {len(force_channels)}\n"
         f"🖼️ Banner: {'✅ Set' if BANNER_FILE_ID or BANNER_URL else '❌ None'}\n"
@@ -1636,7 +1738,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Admin callbacks ───────────────────────────────────────────────────────────────
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    global maintenance_mode, force_channels, BANNER_FILE_ID, BANNER_URL, bot_data
+    global maintenance_mode, force_channels, BANNER_FILE_ID, BANNER_URL, bot_data, zip_enabled
 
     back_btn = [[InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_panel")]]
 
@@ -1993,6 +2095,17 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # FIX #2: Re-render manage admins page directly — single call only
         query.data = "admin_manage_admins"
         await admin_callback(update, context)
+
+    elif query.data == "admin_toggle_zip":
+        zip_enabled = not zip_enabled
+        bot_data["zip_enabled"] = zip_enabled
+        save_data(bot_data)
+        status_txt = "🟢 ON" if zip_enabled else "🔴 OFF"
+        try:
+            await query.answer(f"📦 User Zip is now {status_txt}!", show_alert=True)
+        except Exception:
+            pass
+        await admin_panel(update, context)
 
     elif query.data == "admin_panel":
         await admin_panel(update, context)
@@ -2402,50 +2515,4 @@ def main():
     async def _post_init(app):
         global _global_dl_semaphore
         _global_dl_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
-        logger.info(f"Download semaphore initialised (limit={MAX_CONCURRENT_DOWNLOADS})")
-
-    async def _post_shutdown(app):
-        count = 0
-        for d in glob.glob("/tmp/tmp*"):
-            if os.path.isdir(d):
-                shutil.rmtree(d, ignore_errors=True)
-                count += 1
-        logger.info(f"Shutdown: cleaned {count} temp dirs")
-        print(f"\n✅ Bot offline — {count} temp dirs cleaned.\n")
-
-    application = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .post_init(_post_init)
-        .post_shutdown(_post_shutdown)
-        .build()
-    )
-
-    application.add_handler(CommandHandler("start",       start))
-    application.add_handler(CommandHandler("admin",       admin_panel))
-    application.add_handler(CommandHandler("stats",       stats_command))
-    application.add_handler(CommandHandler("broadcast",   broadcast_command))
-    application.add_handler(CommandHandler("ban",         ban_command))
-    application.add_handler(CommandHandler("unban",       unban_command))
-    application.add_handler(CommandHandler("addadmin",    addadmin_command))
-    application.add_handler(CommandHandler("removeadmin", removeadmin_command))
-    application.add_handler(CommandHandler("setlimit",    setlimit_command))
-    application.add_handler(CommandHandler("resetusage",  resetusage_command))
-    application.add_handler(CommandHandler("cancel",      cancel_command))
-
-    application.add_handler(CallbackQueryHandler(button_handler))
-
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(MessageHandler(
-        filters.PHOTO | filters.VIDEO | filters.Document.ALL | filters.AUDIO | filters.VOICE,
-        handle_message,
-    ))
-
-    application.add_error_handler(error_handler)
-
-    logger.info("🚀 Bot v4.0 is starting...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-
-if __name__ == "__main__":
-    main()
+        logger.info(f"Download semaphore initialised (limit={MA
