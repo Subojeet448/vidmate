@@ -262,29 +262,35 @@ def format_size(mb: float) -> str:
         return f"{mb/1024:.1f} GB"
     return f"{mb:.1f} MB"
 
-def _make_zip(source_path: str, zip_path: str):
-    """Blocking helper: creates a zip archive of source_path at zip_path."""
-    import zipfile
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=5) as zf:
-        zf.write(source_path, arcname=os.path.basename(source_path))
-
-def _split_file(source_path: str, out_dir: str, chunk_mb: int = 45) -> list:
-    """Blocking helper: splits source_path into chunk_mb sized parts. Returns list of part paths."""
-    chunk_size = chunk_mb * 1024 * 1024
-    base_name  = os.path.basename(source_path)
-    parts      = []
-    part_num   = 1
-    with open(source_path, "rb") as f:
-        while True:
-            chunk = f.read(chunk_size)
-            if not chunk:
-                break
-            part_path = os.path.join(out_dir, f"{base_name}.part{part_num:02d}")
-            with open(part_path, "wb") as pf:
-                pf.write(chunk)
-            parts.append(part_path)
-            part_num += 1
-    return parts
+def _get_direct_url(url: str, height: int) -> Optional[str]:
+    """Get direct download URL using yt-dlp without downloading."""
+    extract_audio = (height == 0)
+    if extract_audio:
+        fmt = "bestaudio/best"
+    else:
+        fmt = (
+            f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]"
+            f"/bestvideo[height<={height}]+bestaudio"
+            f"/best[height<={height}]"
+            f"/best"
+        )
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "format": fmt,
+        "socket_timeout": 30,
+    }
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            # For merged formats, get the best video url
+            if "requested_formats" in info:
+                return info["requested_formats"][0].get("url")
+            return info.get("url")
+    except Exception as e:
+        logger.error(f"_get_direct_url error: {e}")
+        return None
 
 def estimate_wait(duration_seconds: int) -> str:
     if duration_seconds <= 60:
@@ -844,76 +850,60 @@ async def do_download(
                     return
 
                 if file_size_mb > MAX_FILE_SIZE_MB:
-                    # ── Document feature ──────────────────────────────────────
+                    # ── Large file: give direct download link ─────────────────
                     if zip_enabled:
-                        # File > 50MB — send as document directly (2GB Telegram limit)
                         if status_msg:
                             await status_msg.edit_text(
-                                f"📦 *File is {file_size_mb:.1f} MB*\n"
-                                f"⏳ Sending as document… please wait, yeh 1-2 min le sakta hai…",
+                                f"🔗 *File is {file_size_mb:.1f} MB — too large for Telegram*\n"
+                                f"⏳ Getting direct download link…",
                                 parse_mode=ParseMode.MARKDOWN,
                             )
-
-                        quality_label = "🎵 MP3" if height == 0 else f"🎬 {height}p"
-                        doc_caption = (
-                            f"📦 *{clean_title[:60]}*\n"
-                            f"━━━━━━━━━━━━━━━━━━━━\n"
-                            f"📄 Document  •  {file_size_mb:.1f} MB  •  {quality_label}  •  {platform}\n"
-                            f"📊 Download #{bot_data['total_downloads']:,}"
+                        direct_url = await asyncio.to_thread(
+                            _get_direct_url, url, height
                         )
-
-                        try:
-                            with open(file_path, "rb") as f:
-                                sent_doc = await context.bot.send_document(
-                                    chat_id=chat_id,
-                                    document=f,
-                                    filename=os.path.basename(file_path),
-                                    caption=doc_caption,
-                                    parse_mode=ParseMode.MARKDOWN,
-                                    read_timeout=600,
-                                    write_timeout=600,
-                                    connect_timeout=30,
-                                    pool_timeout=600,
-                                )
-                            user_manager.increment_downloads(user.id)
-                            db_add_usage(user.id, file_size_mb)
-                            record_download_history(user.id, url, platform)
-                            if status_msg:
-                                await status_msg.edit_text("✅ *Done!*", parse_mode=ParseMode.MARKDOWN)
-                            await asyncio.sleep(1.5)
-                            if status_msg:
-                                try:
-                                    await status_msg.delete()
-                                except Exception:
-                                    pass
-                            # Auto delete after 5 min
-                            if sent_doc:
-                                async def _del_doc(m):
-                                    await asyncio.sleep(300)
-                                    try:
-                                        await m.delete()
-                                    except Exception:
-                                        pass
-                                asyncio.create_task(_del_doc(sent_doc))
-                            await send_log(
-                                context,
-                                f"📥 *Download (Document)*\n"
-                                f"User: @{user.username or 'N/A'} (`{user.id}`)\n"
-                                f"Platform: {platform}  •  Size: {file_size_mb:.1f} MB",
+                        quality_label = "🎵 MP3" if height == 0 else f"🎬 {height}p"
+                        if direct_url:
+                            link_text = (
+                                f"📥 *{clean_title[:60]}*\n"
+                                f"━━━━━━━━━━━━━━━━━━━━\n"
+                                f"📦 Size: {file_size_mb:.1f} MB  •  {quality_label}  •  {platform}\n\n"
+                                f"⚠️ *File is too large for Telegram bot*\n"
+                                f"👇 *Direct download link:*\n"
+                                f"`{direct_url[:500]}`\n\n"
+                                f"_Link expires in few hours — download karo abhi!_"
                             )
-                        except Exception as doc_err:
-                            logger.error(f"Document send error: {doc_err}")
-                            if status_msg:
-                                await status_msg.edit_text(
-                                    f"❌ *Document send failed.*\n"
-                                    f"File size: {file_size_mb:.1f} MB\n"
-                                    f"Error: `{str(doc_err)[:100]}`\n\n"
-                                    f"Try a lower quality.",
-                                    parse_mode=ParseMode.MARKDOWN,
-                                )
+                            kb = [[InlineKeyboardButton("⬇️ Download Now", url=direct_url[:2048])]]
+                            await context.bot.send_message(
+                                chat_id=chat_id,
+                                text=link_text,
+                                parse_mode=ParseMode.MARKDOWN,
+                                reply_markup=InlineKeyboardMarkup(kb),
+                            )
+                        else:
+                            await context.bot.send_message(
+                                chat_id=chat_id,
+                                text=(
+                                    f"⚠️ *File too large ({file_size_mb:.1f} MB)*\n"
+                                    f"Direct link bhi nahi mila.\n"
+                                    f"Please try a lower quality."
+                                ),
+                                parse_mode=ParseMode.MARKDOWN,
+                            )
+                        if status_msg:
+                            try:
+                                await status_msg.delete()
+                            except Exception:
+                                pass
+                        record_download_history(user.id, url, platform)
+                        await send_log(
+                            context,
+                            f"🔗 *Direct Link Sent*\n"
+                            f"User: @{user.username or 'N/A'} (`{user.id}`)\n"
+                            f"Platform: {platform}  •  Size: {file_size_mb:.1f} MB",
+                        )
                         return
                     else:
-                        # Zip is OFF — normal too-large error
+                        # Zip OFF — normal error
                         if status_msg:
                             await status_msg.edit_text(
                                 f"⚠️ *File too large for Telegram*\n"
@@ -922,7 +912,7 @@ async def do_download(
                                 parse_mode=ParseMode.MARKDOWN,
                             )
                         return
-                    # ── end document feature ──────────────────────────────────
+                    # ── end large file feature ────────────────────────────────
 
                 # Thumbnail
                 thumb_path: Optional[str] = None
@@ -2499,7 +2489,6 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ── Error handler ─────────────────────────────────────────────────────────────────
-# ── Error handler ─────────────────────────────────────────────────────────────────
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import traceback
     tb_str = "".join(
@@ -2510,7 +2499,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if update and update.effective_message:
             await update.effective_message.reply_text(
-                f"❌ *An error occurred.*\n`{str(context.error)[:200]}`\n\nPlease try again.",
+                "❌ *An error occurred.*\nPlease try again later.",
                 parse_mode=ParseMode.MARKDOWN,
             )
     except Exception:
@@ -2525,7 +2514,6 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception:
             pass
-
 
 # ── main ──────────────────────────────────────────────────────────────────────────
 def main():
