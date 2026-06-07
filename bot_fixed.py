@@ -267,6 +267,24 @@ def _make_zip(source_path: str, zip_path: str):
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=5) as zf:
         zf.write(source_path, arcname=os.path.basename(source_path))
 
+def _split_file(source_path: str, out_dir: str, chunk_mb: int = 45) -> list:
+    """Blocking helper: splits source_path into chunk_mb sized parts. Returns list of part paths."""
+    chunk_size = chunk_mb * 1024 * 1024
+    base_name  = os.path.basename(source_path)
+    parts      = []
+    part_num   = 1
+    with open(source_path, "rb") as f:
+        while True:
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+            part_path = os.path.join(out_dir, f"{base_name}.part{part_num:02d}")
+            with open(part_path, "wb") as pf:
+                pf.write(chunk)
+            parts.append(part_path)
+            part_num += 1
+    return parts
+
 def estimate_wait(duration_seconds: int) -> str:
     if duration_seconds <= 60:
         return "~1 min"
@@ -825,68 +843,37 @@ async def do_download(
                     return
 
                 if file_size_mb > MAX_FILE_SIZE_MB:
-                    # ── ZIP feature ──────────────────────────────────────────
+                    # ── ZIP/Document feature ─────────────────────────────────
                     if zip_enabled:
-                        # Warn user
+                        # File > 50MB — send as document directly (2GB Telegram limit)
                         if status_msg:
                             await status_msg.edit_text(
-                                f"📦 *File is {file_size_mb:.1f} MB — zipping it for you!*\n"
-                                f"⏳ Please wait ~1 min…",
+                                f"📦 *File is {file_size_mb:.1f} MB*\n"
+                                f"⏳ Sending as document… please wait ~1 min…",
                                 parse_mode=ParseMode.MARKDOWN,
-                            )
-                        # Create zip in same temp_dir
-                        zip_path = file_path + ".zip"
-                        await asyncio.to_thread(_make_zip, file_path, zip_path)
-                        zip_size_mb = os.path.getsize(zip_path) / (1024 * 1024)
-
-                        if zip_size_mb > MAX_FILE_SIZE_MB:
-                            # Zip is still too big
-                            if status_msg:
-                                await status_msg.edit_text(
-                                    f"❌ *Zipped file is still too large ({zip_size_mb:.1f} MB).*\n"
-                                    f"Try a lower quality.",
-                                    parse_mode=ParseMode.MARKDOWN,
-                                )
-                            return
-
-                        # Check limit
-                        allowed, limit_mb2, used_mb2 = db_check_limit(user.id, zip_size_mb)
-                        if not allowed:
-                            if status_msg:
-                                await status_msg.edit_text(
-                                    f"🚫 *Download Limit Reached!*\n"
-                                    f"Your limit: {format_size(limit_mb2)}\n"
-                                    f"Used: {format_size(used_mb2)}\n"
-                                    f"This file: {format_size(zip_size_mb)}\n\n"
-                                    f"Contact admin {CONTACT_USERNAME} to increase your limit.",
-                                    parse_mode=ParseMode.MARKDOWN,
-                                )
-                            return
-
-                        if status_msg:
-                            await status_msg.edit_text(
-                                f"⬆️ *Uploading zip...*\n{platform}", parse_mode=ParseMode.MARKDOWN
                             )
 
                         user_manager.increment_downloads(user.id)
-                        db_add_usage(user.id, zip_size_mb)
+                        db_add_usage(user.id, file_size_mb)
                         record_download_history(user.id, url, platform)
 
-                        zip_caption = (
+                        quality_label = "🎵 MP3" if height == 0 else f"🎬 {height}p"
+                        doc_caption = (
                             f"📦 *{clean_title[:60]}*\n"
                             f"━━━━━━━━━━━━━━━━━━━━\n"
-                            f"🗜️ Zipped  •  {zip_size_mb:.1f} MB  •  {platform}\n"
+                            f"📄 Document  •  {file_size_mb:.1f} MB  •  {quality_label}  •  {platform}\n"
                             f"📊 Download #{bot_data['total_downloads']:,}"
                         )
-                        with open(zip_path, "rb") as zf:
+
+                        with open(file_path, "rb") as f:
                             await context.bot.send_document(
                                 chat_id=chat_id,
-                                document=zf,
-                                filename=os.path.basename(zip_path),
-                                caption=zip_caption,
+                                document=f,
+                                filename=os.path.basename(file_path),
+                                caption=doc_caption,
                                 parse_mode=ParseMode.MARKDOWN,
-                                read_timeout=180,
-                                write_timeout=180,
+                                read_timeout=300,
+                                write_timeout=300,
                             )
 
                         if status_msg:
@@ -899,7 +886,7 @@ async def do_download(
                                 pass
                         return
                     else:
-                        # Zip is OFF — show normal too-large error
+                        # Zip is OFF — normal too-large error
                         if status_msg:
                             await status_msg.edit_text(
                                 f"⚠️ *File too large for Telegram*\n"
@@ -908,7 +895,7 @@ async def do_download(
                                 parse_mode=ParseMode.MARKDOWN,
                             )
                         return
-                    # ── end ZIP feature ──────────────────────────────────────
+                    # ── end document feature ─────────────────────────────────
 
                 # Thumbnail
                 thumb_path: Optional[str] = None
@@ -2507,7 +2494,6 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
 
-# ── main ──────────────────────────────────────────────────────────────────────────
 # ── main ──────────────────────────────────────────────────────────────────────────
 def main():
     init_db()
