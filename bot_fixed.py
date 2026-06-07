@@ -2693,15 +2693,14 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import traceback
     from telegram.error import Conflict, NetworkError
 
-    # ── Fix: Conflict = dusra instance chal raha hai Railway pe ──────────────
     if isinstance(context.error, Conflict):
         logger.warning(
             "⚠️ Conflict: Another bot instance is polling. "
-            "This instance will stop polling. Railway redeploy ke baad theek ho jayega."
+            "Is instance ko band kar rahe hain..."
         )
-        return  # User ko message mat bhejo, silently ignore karo
+        asyncio.create_task(context.application.stop())
+        return
 
-    # ── Transient network errors — log karo, user ko mat batao ───────────────
     if isinstance(context.error, NetworkError):
         logger.warning(f"NetworkError (transient): {context.error}")
         return
@@ -2739,8 +2738,6 @@ def main():
 
     async def _post_init(app):
         global _global_dl_semaphore
-        # ── Fix: Railway redeploy mein old instance 3-5 sec tak chal sakta hai ──
-        # Thoda wait karo taake dono instances ek saath poll na karein
         logger.info("Startup delay (3s) — waiting for any previous instance to stop...")
         await asyncio.sleep(3)
         _global_dl_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
@@ -2755,7 +2752,6 @@ def main():
         logger.info(f"Shutdown: cleaned {count} temp dirs")
         print(f"\n✅ Bot offline — {count} temp dirs cleaned.\n")
 
-    # Large timeouts for big file uploads (up to 2GB documents)
     request = HTTPXRequest(
         connection_pool_size=8,
         read_timeout=600,
@@ -2796,7 +2792,11 @@ def main():
     application.add_error_handler(error_handler)
 
     logger.info("🚀 Bot v4.0 is starting...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True,
+        close_loop=False,
+    )
 
 
 if __name__ == "__main__":
