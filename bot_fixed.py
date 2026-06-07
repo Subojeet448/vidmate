@@ -35,6 +35,7 @@ from telegram.ext import (
     filters,
 )
 from telegram.constants import ParseMode, ChatMemberStatus
+from telegram.request import HTTPXRequest
 import yt_dlp
 
 # ── Logging ───────────────────────────────────────────────────────────────────────
@@ -581,8 +582,8 @@ class DownloadManager:
 
                 if chosen:
                     real_size = os.path.getsize(str(chosen))
-                    # FIX #4: Real size check — 200 MB hard cap
-                    if real_size > 200 * 1024 * 1024:
+                    # Hard cap: 2GB (Telegram document limit)
+                    if real_size > 2000 * 1024 * 1024:
                         return None, "file_too_large", title, None
                     return str(chosen), None, title, thumbnail_url
 
@@ -843,19 +844,15 @@ async def do_download(
                     return
 
                 if file_size_mb > MAX_FILE_SIZE_MB:
-                    # ── ZIP/Document feature ─────────────────────────────────
+                    # ── Document feature ──────────────────────────────────────
                     if zip_enabled:
                         # File > 50MB — send as document directly (2GB Telegram limit)
                         if status_msg:
                             await status_msg.edit_text(
                                 f"📦 *File is {file_size_mb:.1f} MB*\n"
-                                f"⏳ Sending as document… please wait ~1 min…",
+                                f"⏳ Sending as document… please wait, yeh 1-2 min le sakta hai…",
                                 parse_mode=ParseMode.MARKDOWN,
                             )
-
-                        user_manager.increment_downloads(user.id)
-                        db_add_usage(user.id, file_size_mb)
-                        record_download_history(user.id, url, platform)
 
                         quality_label = "🎵 MP3" if height == 0 else f"🎬 {height}p"
                         doc_caption = (
@@ -865,25 +862,55 @@ async def do_download(
                             f"📊 Download #{bot_data['total_downloads']:,}"
                         )
 
-                        with open(file_path, "rb") as f:
-                            await context.bot.send_document(
-                                chat_id=chat_id,
-                                document=f,
-                                filename=os.path.basename(file_path),
-                                caption=doc_caption,
-                                parse_mode=ParseMode.MARKDOWN,
-                                read_timeout=300,
-                                write_timeout=300,
+                        try:
+                            with open(file_path, "rb") as f:
+                                sent_doc = await context.bot.send_document(
+                                    chat_id=chat_id,
+                                    document=f,
+                                    filename=os.path.basename(file_path),
+                                    caption=doc_caption,
+                                    parse_mode=ParseMode.MARKDOWN,
+                                    read_timeout=600,
+                                    write_timeout=600,
+                                    connect_timeout=30,
+                                    pool_timeout=600,
+                                )
+                            user_manager.increment_downloads(user.id)
+                            db_add_usage(user.id, file_size_mb)
+                            record_download_history(user.id, url, platform)
+                            if status_msg:
+                                await status_msg.edit_text("✅ *Done!*", parse_mode=ParseMode.MARKDOWN)
+                            await asyncio.sleep(1.5)
+                            if status_msg:
+                                try:
+                                    await status_msg.delete()
+                                except Exception:
+                                    pass
+                            # Auto delete after 5 min
+                            if sent_doc:
+                                async def _del_doc(m):
+                                    await asyncio.sleep(300)
+                                    try:
+                                        await m.delete()
+                                    except Exception:
+                                        pass
+                                asyncio.create_task(_del_doc(sent_doc))
+                            await send_log(
+                                context,
+                                f"📥 *Download (Document)*\n"
+                                f"User: @{user.username or 'N/A'} (`{user.id}`)\n"
+                                f"Platform: {platform}  •  Size: {file_size_mb:.1f} MB",
                             )
-
-                        if status_msg:
-                            await status_msg.edit_text("✅ *Done!*", parse_mode=ParseMode.MARKDOWN)
-                        await asyncio.sleep(1.5)
-                        if status_msg:
-                            try:
-                                await status_msg.delete()
-                            except Exception:
-                                pass
+                        except Exception as doc_err:
+                            logger.error(f"Document send error: {doc_err}")
+                            if status_msg:
+                                await status_msg.edit_text(
+                                    f"❌ *Document send failed.*\n"
+                                    f"File size: {file_size_mb:.1f} MB\n"
+                                    f"Error: `{str(doc_err)[:100]}`\n\n"
+                                    f"Try a lower quality.",
+                                    parse_mode=ParseMode.MARKDOWN,
+                                )
                         return
                     else:
                         # Zip is OFF — normal too-large error
@@ -895,7 +922,7 @@ async def do_download(
                                 parse_mode=ParseMode.MARKDOWN,
                             )
                         return
-                    # ── end document feature ─────────────────────────────────
+                    # ── end document feature ──────────────────────────────────
 
                 # Thumbnail
                 thumb_path: Optional[str] = None
@@ -939,8 +966,10 @@ async def do_download(
                             performer="Universal Downloader",
                             caption=caption,
                             parse_mode=ParseMode.MARKDOWN,
-                            read_timeout=120,
-                            write_timeout=120,
+                            read_timeout=300,
+                            write_timeout=300,
+                            connect_timeout=30,
+                            pool_timeout=300,
                         )
                     else:
                         thumb_file = open(thumb_path, "rb") if thumb_path else None
@@ -952,8 +981,10 @@ async def do_download(
                                 caption=caption,
                                 parse_mode=ParseMode.MARKDOWN,
                                 supports_streaming=True,
-                                read_timeout=120,
-                                write_timeout=120,
+                                read_timeout=300,
+                                write_timeout=300,
+                                connect_timeout=30,
+                                pool_timeout=300,
                             )
                         finally:
                             if thumb_file:
@@ -986,21 +1017,22 @@ async def do_download(
                 )
 
             except Exception as e:
-                logger.error(f"do_download error: {e}")
-                # FIX #6: Safe check — status_msg may be None if send failed early
+                logger.error(f"do_download error: {e}", exc_info=True)
+                err_text = (
+                    f"❌ *An error occurred.*\n"
+                    f"`{str(e)[:200]}`\n\n"
+                    f"Please try again or try lower quality."
+                )
                 if status_msg:
                     try:
-                        await status_msg.edit_text(
-                            "❌ *An error occurred.*\nPlease try again.",
-                            parse_mode=ParseMode.MARKDOWN,
-                        )
+                        await status_msg.edit_text(err_text, parse_mode=ParseMode.MARKDOWN)
                     except Exception:
                         pass
                 else:
                     try:
                         await context.bot.send_message(
                             chat_id=chat_id,
-                            text="❌ *An error occurred.*\nPlease try again.",
+                            text=err_text,
                             parse_mode=ParseMode.MARKDOWN,
                         )
                     except Exception:
@@ -2467,6 +2499,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ── Error handler ─────────────────────────────────────────────────────────────────
+# ── Error handler ─────────────────────────────────────────────────────────────────
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     import traceback
     tb_str = "".join(
@@ -2477,7 +2510,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if update and update.effective_message:
             await update.effective_message.reply_text(
-                "❌ *An error occurred.*\nPlease try again later.",
+                f"❌ *An error occurred.*\n`{str(context.error)[:200]}`\n\nPlease try again.",
                 parse_mode=ParseMode.MARKDOWN,
             )
     except Exception:
@@ -2513,9 +2546,19 @@ def main():
         logger.info(f"Shutdown: cleaned {count} temp dirs")
         print(f"\n✅ Bot offline — {count} temp dirs cleaned.\n")
 
+    # Large timeouts for big file uploads (up to 2GB documents)
+    request = HTTPXRequest(
+        connection_pool_size=8,
+        read_timeout=600,
+        write_timeout=600,
+        connect_timeout=30,
+        pool_timeout=600,
+    )
+
     application = (
         Application.builder()
         .token(BOT_TOKEN)
+        .request(request)
         .post_init(_post_init)
         .post_shutdown(_post_shutdown)
         .build()
